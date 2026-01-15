@@ -43,10 +43,10 @@ const platforms = [
 ];
 
 const steps = [
-  "Download the agent for your operating system",
-  "Install and launch the application",
-  "Enter your server URL and Team Member ID",
-  "Connect and start monitoring",
+  "Clone or download the project source code to your computer",
+  "Open terminal in the desktop-agent folder and run: npm install",
+  "Run npm start to launch the agent (or build an installer with npm run build:win/mac/linux)",
+  "Enter your server URL and Team Member ID to connect",
 ];
 
 export default function Download() {
@@ -83,17 +83,33 @@ export default function Download() {
 
         <Card className="mb-8">
           <CardHeader>
-            <CardTitle>Choose Your Platform</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              Choose Your Platform
+              <Badge variant="secondary">Build Required</Badge>
+            </CardTitle>
             <CardDescription>
-              Download the agent for your operating system
+              The desktop agent must be built from source before it can be installed
             </CardDescription>
           </CardHeader>
           <CardContent>
+            <div className="mb-6 rounded-lg border border-primary/20 bg-primary/5 p-4">
+              <h4 className="font-semibold text-primary mb-2">How to Get the Agent</h4>
+              <p className="text-sm text-muted-foreground mb-3">
+                The desktop agent is an Electron app that needs to be built on your computer. 
+                Follow these steps:
+              </p>
+              <ol className="text-sm space-y-1 list-decimal list-inside text-muted-foreground">
+                <li>Download or clone the project source code</li>
+                <li>Open the <code className="bg-muted px-1 rounded">desktop-agent</code> folder</li>
+                <li>Run <code className="bg-muted px-1 rounded">npm install</code> then <code className="bg-muted px-1 rounded">npm start</code></li>
+                <li>Or build an installer using the commands below</li>
+              </ol>
+            </div>
             <div className="grid gap-4 md:grid-cols-3">
               {platforms.map((platform) => (
                 <div
                   key={platform.id}
-                  className="flex flex-col items-center rounded-lg border p-6 hover-elevate"
+                  className="flex flex-col items-center rounded-lg border p-6 opacity-60"
                   data-testid={`card-platform-${platform.id}`}
                 >
                   <Laptop className="mb-3 h-12 w-12" />
@@ -103,22 +119,15 @@ export default function Download() {
                   </p>
                   <Button
                     className="w-full"
+                    disabled
+                    variant="secondary"
                     data-testid={`button-download-${platform.id}`}
                   >
                     <DownloadIcon className="mr-2 h-4 w-4" />
-                    Download {platform.extension}
+                    Build from source
                   </Button>
                 </div>
               ))}
-            </div>
-            <div className="mt-6 rounded-lg bg-muted/50 p-4 text-center">
-              <Badge variant="secondary" className="mb-2">
-                Coming Soon
-              </Badge>
-              <p className="text-sm text-muted-foreground">
-                Desktop agent downloads will be available once the builds are ready.
-                For now, developers can build from source using the instructions below.
-              </p>
             </div>
           </CardContent>
         </Card>
