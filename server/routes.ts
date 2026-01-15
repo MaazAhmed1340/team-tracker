@@ -4,6 +4,13 @@ import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
 import { insertTeamMemberSchema, insertScreenshotSchema, insertActivityLogSchema } from "@shared/schema";
 import { z } from "zod";
+import { randomBytes } from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+
+function generateToken(): string {
+  return randomBytes(32).toString("hex");
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -251,6 +258,254 @@ export async function registerRoutes(
         return res.status(400).json({ error: error.errors });
       }
       res.status(500).json({ error: "Failed to update heartbeat" });
+    }
+  });
+
+  const agentRegisterSchema = z.object({
+    teamMemberId: z.string().min(1),
+    deviceName: z.string().min(1),
+    platform: z.enum(["windows", "macos", "linux"]),
+  });
+
+  app.post("/api/agent/register", async (req, res) => {
+    try {
+      const data = agentRegisterSchema.parse(req.body);
+      
+      const member = await storage.getTeamMember(data.teamMemberId);
+      if (!member) {
+        return res.status(404).json({ error: "Team member not found" });
+      }
+
+      const token = generateToken();
+      const agentToken = await storage.createAgentToken({
+        teamMemberId: data.teamMemberId,
+        token,
+        deviceName: data.deviceName,
+        platform: data.platform,
+        isActive: true,
+      });
+
+      res.status(201).json({
+        token,
+        agentId: agentToken.id,
+        teamMember: {
+          id: member.id,
+          name: member.name,
+          email: member.email,
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to register agent" });
+    }
+  });
+
+  app.get("/api/agent/verify", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      await storage.updateAgentTokenLastSeen(agentToken.id);
+
+      res.json({
+        valid: true,
+        teamMember: {
+          id: agentToken.teamMember.id,
+          name: agentToken.teamMember.name,
+          email: agentToken.teamMember.email,
+        },
+        device: {
+          id: agentToken.id,
+          name: agentToken.deviceName,
+          platform: agentToken.platform,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to verify token" });
+    }
+  });
+
+  const agentScreenshotSchema = z.object({
+    imageData: z.string().min(1),
+    mouseClicks: z.number().int().min(0).default(0),
+    keystrokes: z.number().int().min(0).default(0),
+    activityScore: z.number().min(0).max(100).default(0),
+  });
+
+  app.post("/api/agent/screenshot", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const data = agentScreenshotSchema.parse(req.body);
+
+      const uploadsDir = path.join(process.cwd(), "uploads", "screenshots");
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+
+      const fileName = `${Date.now()}-${agentToken.teamMember.id}.png`;
+      const filePath = path.join(uploadsDir, fileName);
+      
+      const base64Data = data.imageData.replace(/^data:image\/\w+;base64,/, "");
+      fs.writeFileSync(filePath, base64Data, "base64");
+
+      const imageUrl = `/uploads/screenshots/${fileName}`;
+
+      const screenshot = await storage.createScreenshot({
+        teamMemberId: agentToken.teamMember.id,
+        imageUrl,
+        mouseClicks: data.mouseClicks,
+        keystrokes: data.keystrokes,
+        activityScore: data.activityScore,
+      });
+
+      await storage.updateTeamMember(agentToken.teamMember.id, {
+        status: "online",
+      });
+
+      await storage.updateAgentTokenLastSeen(agentToken.id);
+
+      broadcast({ type: "SCREENSHOT_ADDED", screenshot });
+
+      res.status(201).json({ success: true, screenshotId: screenshot.id });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to upload screenshot" });
+    }
+  });
+
+  const agentHeartbeatSchema = z.object({
+    status: z.enum(["online", "idle", "offline"]).optional(),
+    mouseClicks: z.number().int().min(0).optional(),
+    keystrokes: z.number().int().min(0).optional(),
+  });
+
+  app.post("/api/agent/heartbeat", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const data = agentHeartbeatSchema.parse(req.body);
+
+      const member = await storage.updateTeamMember(agentToken.teamMember.id, {
+        status: data.status || "online",
+      });
+
+      await storage.updateAgentTokenLastSeen(agentToken.id);
+
+      if (member) {
+        broadcast({ type: "STATUS_CHANGED", member });
+      }
+
+      const settings = await storage.getSettings();
+
+      res.json({
+        success: true,
+        settings: {
+          screenshotInterval: settings.screenshotInterval,
+          enableActivityTracking: settings.enableActivityTracking,
+          enableMouseTracking: settings.enableMouseTracking,
+          enableKeyboardTracking: settings.enableKeyboardTracking,
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to process heartbeat" });
+    }
+  });
+
+  app.get("/api/agent/settings", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const settings = await storage.getSettings();
+      const member = agentToken.teamMember;
+
+      res.json({
+        screenshotInterval: member.screenshotInterval || settings.screenshotInterval,
+        enableActivityTracking: settings.enableActivityTracking,
+        enableMouseTracking: settings.enableMouseTracking,
+        enableKeyboardTracking: settings.enableKeyboardTracking,
+        isMonitoring: member.isMonitoring,
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get agent settings" });
+    }
+  });
+
+  app.get("/api/team-members/:id/devices", async (req, res) => {
+    try {
+      const devices = await storage.getAgentTokensByMember(req.params.id);
+      res.json(devices);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get devices" });
+    }
+  });
+
+  app.delete("/api/agent/devices/:id", async (req, res) => {
+    try {
+      await storage.deactivateAgentToken(req.params.id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to deactivate device" });
+    }
+  });
+
+  app.get("/uploads/screenshots/:filename", async (req, res) => {
+    try {
+      const filePath = path.join(process.cwd(), "uploads", "screenshots", req.params.filename);
+      
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+
+      res.sendFile(filePath);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to serve screenshot" });
     }
   });
 

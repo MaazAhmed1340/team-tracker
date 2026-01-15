@@ -52,6 +52,24 @@ export const activityLogsRelations = relations(activityLogs, ({ one }) => ({
   }),
 }));
 
+export const agentTokens = pgTable("agent_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teamMemberId: varchar("team_member_id").notNull().references(() => teamMembers.id, { onDelete: "cascade" }),
+  token: text("token").notNull().unique(),
+  deviceName: text("device_name").notNull(),
+  platform: text("platform").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  lastSeenAt: timestamp("last_seen_at"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const agentTokensRelations = relations(agentTokens, ({ one }) => ({
+  teamMember: one(teamMembers, {
+    fields: [agentTokens.teamMemberId],
+    references: [teamMembers.id],
+  }),
+}));
+
 export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({
   id: true,
   lastActiveAt: true,
@@ -84,4 +102,17 @@ export type TeamMemberWithStats = TeamMember & {
   screenshotCount: number;
   avgActivityScore: number;
   lastScreenshot?: Screenshot;
+};
+
+export const insertAgentTokenSchema = createInsertSchema(agentTokens).omit({
+  id: true,
+  lastSeenAt: true,
+  createdAt: true,
+});
+
+export type InsertAgentToken = z.infer<typeof insertAgentTokenSchema>;
+export type AgentToken = typeof agentTokens.$inferSelect;
+
+export type AgentTokenWithMember = AgentToken & {
+  teamMember: TeamMember;
 };

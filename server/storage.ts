@@ -2,14 +2,18 @@ import {
   teamMembers,
   screenshots,
   activityLogs,
+  agentTokens,
   type TeamMember,
   type InsertTeamMember,
   type Screenshot,
   type InsertScreenshot,
   type ActivityLog,
   type InsertActivityLog,
+  type AgentToken,
+  type InsertAgentToken,
   type TeamMemberWithStats,
   type ScreenshotWithMember,
+  type AgentTokenWithMember,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
@@ -32,6 +36,12 @@ export interface IStorage {
 
   getActivityLogs(memberId: string): Promise<ActivityLog[]>;
   createActivityLog(log: InsertActivityLog): Promise<ActivityLog>;
+
+  getAgentTokenByToken(token: string): Promise<AgentTokenWithMember | undefined>;
+  createAgentToken(agentToken: InsertAgentToken): Promise<AgentToken>;
+  updateAgentTokenLastSeen(id: string): Promise<void>;
+  getAgentTokensByMember(memberId: string): Promise<AgentToken[]>;
+  deactivateAgentToken(id: string): Promise<void>;
 
   getMemberStats(memberId: string): Promise<{
     totalScreenshots: number;
@@ -329,6 +339,47 @@ export class DatabaseStorage implements IStorage {
   async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     this.settings = { ...this.settings, ...updates };
     return this.settings;
+  }
+
+  async getAgentTokenByToken(token: string): Promise<AgentTokenWithMember | undefined> {
+    const [agentToken] = await db
+      .select()
+      .from(agentTokens)
+      .where(and(eq(agentTokens.token, token), eq(agentTokens.isActive, true)));
+
+    if (!agentToken) return undefined;
+
+    const member = await this.getTeamMember(agentToken.teamMemberId);
+    if (!member) return undefined;
+
+    return { ...agentToken, teamMember: member };
+  }
+
+  async createAgentToken(agentToken: InsertAgentToken): Promise<AgentToken> {
+    const [created] = await db.insert(agentTokens).values(agentToken).returning();
+    return created;
+  }
+
+  async updateAgentTokenLastSeen(id: string): Promise<void> {
+    await db
+      .update(agentTokens)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(agentTokens.id, id));
+  }
+
+  async getAgentTokensByMember(memberId: string): Promise<AgentToken[]> {
+    return db
+      .select()
+      .from(agentTokens)
+      .where(eq(agentTokens.teamMemberId, memberId))
+      .orderBy(desc(agentTokens.createdAt));
+  }
+
+  async deactivateAgentToken(id: string): Promise<void> {
+    await db
+      .update(agentTokens)
+      .set({ isActive: false })
+      .where(eq(agentTokens.id, id));
   }
 }
 
