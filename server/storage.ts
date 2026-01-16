@@ -200,6 +200,7 @@ export class DatabaseStorage implements IStorage {
     const allScreenshots = await db
       .select()
       .from(screenshots)
+      .where(eq(screenshots.isDeleted, false))
       .orderBy(desc(screenshots.capturedAt));
 
     const result: ScreenshotWithMember[] = [];
@@ -216,6 +217,7 @@ export class DatabaseStorage implements IStorage {
     const recentScreenshots = await db
       .select()
       .from(screenshots)
+      .where(eq(screenshots.isDeleted, false))
       .orderBy(desc(screenshots.capturedAt))
       .limit(limit);
 
@@ -233,7 +235,10 @@ export class DatabaseStorage implements IStorage {
     const memberScreenshots = await db
       .select()
       .from(screenshots)
-      .where(eq(screenshots.teamMemberId, memberId))
+      .where(and(
+        eq(screenshots.teamMemberId, memberId),
+        eq(screenshots.isDeleted, false)
+      ))
       .orderBy(desc(screenshots.capturedAt));
 
     const member = await this.getTeamMember(memberId);
@@ -251,7 +256,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteScreenshot(id: string): Promise<boolean> {
-    await db.delete(screenshots).where(eq(screenshots.id, id));
+    await db
+      .update(screenshots)
+      .set({ isDeleted: true })
+      .where(eq(screenshots.id, id));
     return true;
   }
 
