@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { Users, Camera, Activity, TrendingUp } from "lucide-react";
+import { Users, Camera, Activity, Timer } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatCard } from "@/components/stat-card";
 import { ScreenshotCard } from "@/components/screenshot-card";
@@ -21,7 +21,7 @@ interface DashboardStats {
   activeUsers: number;
   totalScreenshots: number;
   averageActivity: number;
-  topPerformer: string;
+  totalTimeToday: number;
 }
 
 interface TimelineData {
@@ -49,6 +49,15 @@ export default function Dashboard() {
   const { data: timeline, isLoading: timelineLoading } = useQuery<TimelineData[]>({
     queryKey: ["/api/dashboard/timeline"],
   });
+
+  const formatTimeTracked = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+  };
 
   const openLightbox = (screenshot: ScreenshotWithMember, index: number) => {
     setSelectedScreenshot(screenshot);
@@ -117,10 +126,10 @@ export default function Dashboard() {
               trend={{ value: 5, isPositive: true }}
             />
             <StatCard
-              title="Top Performer"
-              value={stats?.topPerformer ?? "N/A"}
-              subtitle="Highest activity today"
-              icon={TrendingUp}
+              title="Time Tracked"
+              value={formatTimeTracked(stats?.totalTimeToday ?? 0)}
+              subtitle="Total team time today"
+              icon={Timer}
             />
           </>
         )}

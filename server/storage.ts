@@ -73,7 +73,7 @@ export interface IStorage {
     activeUsers: number;
     totalScreenshots: number;
     averageActivity: number;
-    topPerformer: string;
+    totalTimeToday: number;
   }>;
 
   getTimeline(memberId?: string): Promise<{ hour: number; activityLevel: "high" | "medium" | "low" | "none" }[]>;
@@ -124,6 +124,9 @@ export class DatabaseStorage implements IStorage {
   async getTeamMembersWithStats(): Promise<TeamMemberWithStats[]> {
     const members = await this.getAllTeamMembers();
     const result: TeamMemberWithStats[] = [];
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     for (const member of members) {
       const memberScreenshots = await db
@@ -141,11 +144,16 @@ export class DatabaseStorage implements IStorage {
         .from(screenshots)
         .where(eq(screenshots.teamMemberId, member.id));
 
+      const timeStats = await this.getMemberTimeStats(member.id, today);
+      const activeTimer = await this.getActiveTimeEntry(member.id);
+
       result.push({
         ...member,
         screenshotCount: Number(statsResult[0]?.count ?? 0),
         avgActivityScore: Number(statsResult[0]?.avgScore ?? 0),
         lastScreenshot: memberScreenshots[0],
+        timeTrackedToday: timeStats.totalSeconds,
+        hasActiveTimer: !!activeTimer,
       });
     }
 
@@ -278,7 +286,7 @@ export class DatabaseStorage implements IStorage {
     activeUsers: number;
     totalScreenshots: number;
     averageActivity: number;
-    topPerformer: string;
+    totalTimeToday: number;
   }> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -294,20 +302,18 @@ export class DatabaseStorage implements IStorage {
       .from(screenshots)
       .where(gte(screenshots.capturedAt, today));
 
-    const memberStats = await Promise.all(
-      members.map(async (member) => {
-        const stats = await this.getMemberStats(member.id);
-        return { name: member.name, score: stats.avgActivityScore };
+    const todayTimeResult = await db
+      .select({
+        totalSeconds: sql<number>`coalesce(sum(${timeEntries.duration}), 0)`,
       })
-    );
-
-    const topPerformer = memberStats.sort((a, b) => b.score - a.score)[0]?.name || "N/A";
+      .from(timeEntries)
+      .where(and(gte(timeEntries.startTime, today), eq(timeEntries.isActive, false)));
 
     return {
       activeUsers,
       totalScreenshots: Number(todayScreenshots[0]?.count ?? 0),
       averageActivity: Number(todayScreenshots[0]?.avgScore ?? 0),
-      topPerformer,
+      totalTimeToday: Number(todayTimeResult[0]?.totalSeconds ?? 0),
     };
   }
 

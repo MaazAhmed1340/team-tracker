@@ -1,4 +1,5 @@
-import { format, formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow } from "date-fns";
+import { Play, Timer } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -25,6 +26,15 @@ export function TeamMemberRow({
     .slice(0, 2);
 
   const status = (member.status as "online" | "idle" | "offline") || "offline";
+
+  const formatTimeTracked = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+  };
 
   return (
     <div
@@ -57,7 +67,19 @@ export function TeamMemberRow({
       </div>
       <div className="flex flex-col items-end gap-1">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">Activity</span>
+          {member.hasActiveTimer && (
+            <div className="flex items-center gap-1 text-primary" data-testid="timer-active-indicator">
+              <Play className="h-3 w-3 animate-pulse" />
+            </div>
+          )}
+          {member.timeTrackedToday !== undefined && member.timeTrackedToday > 0 && (
+            <div className="flex items-center gap-1 text-xs text-muted-foreground" data-testid="time-tracked-today">
+              <Timer className="h-3 w-3" />
+              <span>{formatTimeTracked(member.timeTrackedToday)}</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
           <Progress
             value={member.avgActivityScore}
             className="h-1.5 w-16"

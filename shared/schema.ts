@@ -135,6 +135,8 @@ export type TeamMemberWithStats = TeamMember & {
   screenshotCount: number;
   avgActivityScore: number;
   lastScreenshot?: Screenshot;
+  timeTrackedToday?: number;
+  hasActiveTimer?: boolean;
 };
 
 export const insertAgentTokenSchema = createInsertSchema(agentTokens).omit({
