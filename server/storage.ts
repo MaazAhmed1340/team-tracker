@@ -4,6 +4,7 @@ import {
   activityLogs,
   agentTokens,
   timeEntries,
+  appUsage,
   type TeamMember,
   type InsertTeamMember,
   type Screenshot,
@@ -14,6 +15,9 @@ import {
   type InsertAgentToken,
   type TimeEntry,
   type InsertTimeEntry,
+  type AppUsage,
+  type InsertAppUsage,
+  type AppUsageSummary,
   type TeamMemberWithStats,
   type ScreenshotWithMember,
   type AgentTokenWithMember,
@@ -60,6 +64,13 @@ export interface IStorage {
     totalIdleSeconds: number;
     entriesCount: number;
   }>;
+
+  getActiveAppUsage(memberId: string): Promise<AppUsage | undefined>;
+  getAppUsageByMember(memberId: string, startDate?: Date, endDate?: Date): Promise<AppUsage[]>;
+  getAppUsageSummary(memberId: string, startDate?: Date, endDate?: Date): Promise<AppUsageSummary[]>;
+  createAppUsage(usage: InsertAppUsage): Promise<AppUsage>;
+  updateAppUsage(id: string, updates: Partial<InsertAppUsage>): Promise<AppUsage | undefined>;
+  endAppUsage(id: string): Promise<AppUsage | undefined>;
 
   getMemberStats(memberId: string): Promise<{
     totalScreenshots: number;
@@ -526,6 +537,94 @@ export class DatabaseStorage implements IStorage {
       totalIdleSeconds: Number(result[0]?.totalIdleSeconds ?? 0),
       entriesCount: Number(result[0]?.count ?? 0),
     };
+  }
+
+  async getActiveAppUsage(memberId: string): Promise<AppUsage | undefined> {
+    const [usage] = await db
+      .select()
+      .from(appUsage)
+      .where(and(eq(appUsage.teamMemberId, memberId), eq(appUsage.isActive, true)));
+    return usage || undefined;
+  }
+
+  async getAppUsageByMember(memberId: string, startDate?: Date, endDate?: Date): Promise<AppUsage[]> {
+    let conditions = [eq(appUsage.teamMemberId, memberId)];
+    
+    if (startDate) {
+      conditions.push(gte(appUsage.startTime, startDate));
+    }
+    if (endDate) {
+      conditions.push(sql`${appUsage.startTime} <= ${endDate}`);
+    }
+
+    return db
+      .select()
+      .from(appUsage)
+      .where(and(...conditions))
+      .orderBy(desc(appUsage.startTime));
+  }
+
+  async getAppUsageSummary(memberId: string, startDate?: Date, endDate?: Date): Promise<AppUsageSummary[]> {
+    let conditions = [eq(appUsage.teamMemberId, memberId), eq(appUsage.isActive, false)];
+    
+    if (startDate) {
+      conditions.push(gte(appUsage.startTime, startDate));
+    }
+    if (endDate) {
+      conditions.push(sql`${appUsage.startTime} <= ${endDate}`);
+    }
+
+    const result = await db
+      .select({
+        appName: appUsage.appName,
+        appType: appUsage.appType,
+        totalDuration: sql<number>`coalesce(sum(${appUsage.durationSeconds}), 0)`,
+        sessionCount: sql<number>`count(*)`,
+      })
+      .from(appUsage)
+      .where(and(...conditions))
+      .groupBy(appUsage.appName, appUsage.appType)
+      .orderBy(sql`sum(${appUsage.durationSeconds}) desc`);
+
+    return result.map(r => ({
+      appName: r.appName,
+      appType: r.appType,
+      totalDuration: Number(r.totalDuration),
+      sessionCount: Number(r.sessionCount),
+    }));
+  }
+
+  async createAppUsage(usage: InsertAppUsage): Promise<AppUsage> {
+    const [created] = await db.insert(appUsage).values(usage).returning();
+    return created;
+  }
+
+  async updateAppUsage(id: string, updates: Partial<InsertAppUsage>): Promise<AppUsage | undefined> {
+    const [updated] = await db
+      .update(appUsage)
+      .set(updates)
+      .where(eq(appUsage.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async endAppUsage(id: string): Promise<AppUsage | undefined> {
+    const [usage] = await db.select().from(appUsage).where(eq(appUsage.id, id));
+    if (!usage) return undefined;
+
+    const endTime = new Date();
+    const durationSeconds = Math.floor((endTime.getTime() - usage.startTime.getTime()) / 1000);
+
+    const [updated] = await db
+      .update(appUsage)
+      .set({
+        endTime,
+        durationSeconds,
+        isActive: false,
+      })
+      .where(eq(appUsage.id, id))
+      .returning();
+    return updated || undefined;
   }
 }
 

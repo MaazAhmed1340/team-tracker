@@ -849,5 +849,88 @@ export async function registerRoutes(
     }
   });
 
+  const appUsageSchema = z.object({
+    appName: z.string().min(1),
+    appType: z.enum(["application", "website"]).default("application"),
+    windowTitle: z.string().optional(),
+    url: z.string().optional(),
+  });
+
+  app.post("/api/agent/app-usage", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      await storage.updateAgentTokenLastSeen(agentToken.id);
+      const data = appUsageSchema.parse(req.body);
+
+      const activeUsage = await storage.getActiveAppUsage(agentToken.teamMember.id);
+
+      if (activeUsage) {
+        if (activeUsage.appName === data.appName && 
+            activeUsage.windowTitle === data.windowTitle) {
+          return res.json({ status: "unchanged", usage: activeUsage });
+        }
+
+        await storage.endAppUsage(activeUsage.id);
+      }
+
+      const usage = await storage.createAppUsage({
+        teamMemberId: agentToken.teamMember.id,
+        appName: data.appName,
+        appType: data.appType,
+        windowTitle: data.windowTitle,
+        url: data.url,
+        startTime: new Date(),
+        isActive: true,
+      });
+
+      broadcast({ type: "APP_USAGE_CHANGED", memberId: agentToken.teamMember.id, usage });
+      res.json({ status: "created", usage });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to record app usage" });
+    }
+  });
+
+  app.get("/api/team-members/:id/app-usage", async (req, res) => {
+    try {
+      const memberId = req.params.id;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const summary = await storage.getAppUsageSummary(memberId, today);
+      const activeApp = await storage.getActiveAppUsage(memberId);
+
+      res.json({ summary, activeApp });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get app usage" });
+    }
+  });
+
+  app.get("/api/team-members/:id/app-usage/history", async (req, res) => {
+    try {
+      const memberId = req.params.id;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const history = await storage.getAppUsageByMember(memberId, today);
+      res.json(history);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get app usage history" });
+    }
+  });
+
   return httpServer;
 }
