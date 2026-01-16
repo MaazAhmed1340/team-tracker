@@ -18,6 +18,8 @@ let lastActivityTime = Date.now();
 let timerRunning = false;
 let timerStartTime = null;
 let currentTimerEntry = null;
+let appTrackingInterval = null;
+let lastActiveApp = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -210,6 +212,8 @@ function startMonitoring() {
 
   setInterval(sendHeartbeat, 30000);
 
+  startAppTracking();
+
   updateTrayMenu();
   
   if (mainWindow) {
@@ -226,6 +230,8 @@ function stopMonitoring() {
     clearInterval(captureInterval);
     captureInterval = null;
   }
+
+  stopAppTracking();
 
   updateTrayMenu();
   
@@ -395,6 +401,95 @@ async function reportIdleTime(idleSeconds) {
 
 function recordActivity() {
   lastActivityTime = Date.now();
+}
+
+async function getActiveWindowInfo() {
+  try {
+    const activeWindow = require('active-win');
+    const result = await activeWindow();
+    
+    if (!result) return null;
+    
+    let appType = 'application';
+    let url = null;
+    const browserApps = ['chrome', 'firefox', 'safari', 'edge', 'brave', 'opera'];
+    const appNameLower = (result.owner?.name || '').toLowerCase();
+    
+    if (browserApps.some(browser => appNameLower.includes(browser))) {
+      appType = 'website';
+      if (result.title) {
+        const urlMatch = result.title.match(/https?:\/\/[^\s]+/);
+        if (urlMatch) {
+          url = urlMatch[0];
+        }
+      }
+    }
+    
+    return {
+      appName: result.owner?.name || 'Unknown',
+      windowTitle: result.title || '',
+      appType,
+      url,
+    };
+  } catch (error) {
+    console.error('Failed to get active window:', error);
+    return null;
+  }
+}
+
+async function reportAppUsage(windowInfo) {
+  const token = store.get('authToken');
+  if (!token || !windowInfo) return;
+
+  try {
+    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/app-usage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(windowInfo)
+    });
+
+    if (!response.ok) {
+      throw new Error(`App usage report failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.status === 'created' && mainWindow) {
+      mainWindow.webContents.send('app-usage-changed', data.usage);
+    }
+  } catch (error) {
+    console.error('Failed to report app usage:', error);
+  }
+}
+
+async function trackActiveApp() {
+  const windowInfo = await getActiveWindowInfo();
+  
+  if (!windowInfo) return;
+  
+  const appKey = `${windowInfo.appName}|${windowInfo.windowTitle}`;
+  if (appKey !== lastActiveApp) {
+    lastActiveApp = appKey;
+    await reportAppUsage(windowInfo);
+  }
+}
+
+function startAppTracking() {
+  if (appTrackingInterval) return;
+  
+  trackActiveApp();
+  
+  appTrackingInterval = setInterval(trackActiveApp, 10000);
+}
+
+function stopAppTracking() {
+  if (appTrackingInterval) {
+    clearInterval(appTrackingInterval);
+    appTrackingInterval = null;
+  }
+  lastActiveApp = null;
 }
 
 ipcMain.handle('login', async (event, { serverUrl, teamMemberId, deviceName, platform }) => {
