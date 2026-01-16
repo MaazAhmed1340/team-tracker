@@ -37,6 +37,8 @@ Preferred communication style: Simple, everyday language.
 - **Team Members**: User profiles with monitoring settings, status tracking
 - **Screenshots**: Captured images with activity metrics (clicks, keystrokes, activity score)
 - **Activity Logs**: Event-based logging for detailed activity tracking
+- **Time Entries**: Start/stop timer records with duration, project, notes, and idle time tracking
+- **Agent Tokens**: Authentication tokens for desktop agent connections
 
 ### Project Structure
 ```
