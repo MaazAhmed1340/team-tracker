@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { format, formatDistanceToNow } from "date-fns";
-import { ArrowLeft, Camera, Activity, Clock, Settings } from "lucide-react";
+import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -18,7 +18,13 @@ import {
   TimelineSkeleton,
 } from "@/components/loading-skeleton";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { TeamMember, ScreenshotWithMember } from "@shared/schema";
+import type { TeamMember, ScreenshotWithMember, TimeEntry } from "@shared/schema";
+
+interface TimeStats {
+  totalSeconds: number;
+  totalIdleSeconds: number;
+  entriesCount: number;
+}
 
 interface MemberStats {
   totalScreenshots: number;
@@ -60,6 +66,34 @@ export default function TeamMemberDetail() {
     queryKey: ["/api/team-members", memberId, "timeline"],
     enabled: !!memberId,
   });
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const { data: timeStats, isLoading: timeStatsLoading } = useQuery<TimeStats>({
+    queryKey: ["/api/team-members", memberId, "time-stats"],
+    enabled: !!memberId,
+  });
+
+  const { data: timeEntries, isLoading: timeEntriesLoading } = useQuery<TimeEntry[]>({
+    queryKey: ["/api/time-entries", { memberId }],
+    enabled: !!memberId,
+  });
+
+  const { data: activeTimer } = useQuery<TimeEntry | null>({
+    queryKey: ["/api/time-entries/active", memberId],
+    enabled: !!memberId,
+    refetchInterval: 60000,
+  });
+
+  const formatTimeTracked = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+  };
 
   if (!memberId) {
     navigate("/team");
@@ -294,6 +328,90 @@ export default function TeamMemberDetail() {
                       {member?.isMonitoring ? "Active" : "Paused"}
                     </Badge>
                   </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card data-testid="card-time-tracking">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-lg font-medium">
+                <Timer className="h-4 w-4" />
+                Time Tracking
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {timeStatsLoading ? (
+                <div className="flex flex-col gap-3">
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-1/2" />
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  {activeTimer && (
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-primary/10 border border-primary/20">
+                      <Play className="h-4 w-4 text-primary animate-pulse" />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium">Timer Running</p>
+                        <p className="text-xs text-muted-foreground">
+                          {activeTimer.project || "No project"} - Started{" "}
+                          {formatDistanceToNow(new Date(activeTimer.startTime), {
+                            addSuffix: true,
+                          })}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-3 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Time Today</span>
+                      <span className="font-semibold text-lg">
+                        {formatTimeTracked(timeStats?.totalSeconds ?? 0)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Idle Time</span>
+                      <span className="font-medium text-orange-500">
+                        {formatTimeTracked(timeStats?.totalIdleSeconds ?? 0)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Entries</span>
+                      <span className="font-medium">{timeStats?.entriesCount ?? 0}</span>
+                    </div>
+                  </div>
+                  {timeEntries && timeEntries.length > 0 && (
+                    <div className="border-t pt-3 mt-2">
+                      <p className="text-xs font-medium text-muted-foreground mb-2">Recent Entries</p>
+                      <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
+                        {timeEntries.slice(0, 5).map((entry) => (
+                          <div
+                            key={entry.id}
+                            className="flex items-center justify-between text-xs p-2 rounded bg-muted/50"
+                            data-testid={`time-entry-${entry.id}`}
+                          >
+                            <div className="flex flex-col">
+                              <span className="font-medium">{entry.project || "No project"}</span>
+                              <span className="text-muted-foreground">
+                                {format(new Date(entry.startTime), "MMM d, h:mm a")}
+                              </span>
+                            </div>
+                            <div className="text-right">
+                              <span className="font-semibold">
+                                {entry.duration ? formatTimeTracked(entry.duration) : "-"}
+                              </span>
+                              {entry.isActive && (
+                                <Badge variant="secondary" className="ml-2 text-xs">
+                                  Active
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>
