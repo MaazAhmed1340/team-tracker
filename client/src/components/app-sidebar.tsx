@@ -1,5 +1,5 @@
 import { useLocation, Link } from "wouter";
-import { LayoutDashboard, Camera, Users, Settings, Monitor, Download } from "lucide-react";
+import { LayoutDashboard, Camera, Users, Settings, Monitor, Download, BarChart3 } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -28,6 +28,11 @@ const navItems = [
     title: "Team",
     url: "/team",
     icon: Users,
+  },
+  {
+    title: "Reports",
+    url: "/reports",
+    icon: BarChart3,
   },
   {
     title: "Settings",

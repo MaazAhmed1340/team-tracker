@@ -39,6 +39,7 @@ Preferred communication style: Simple, everyday language.
 - **Activity Logs**: Event-based logging for detailed activity tracking
 - **Time Entries**: Start/stop timer records with duration, project, notes, and idle time tracking
 - **Agent Tokens**: Authentication tokens for desktop agent connections
+- **App Usage**: Application/website tracking with duration, app type, and window titles
 
 ### Project Structure
 ```
@@ -79,6 +80,15 @@ Preferred communication style: Simple, everyday language.
 - **date-fns**: Date formatting and manipulation
 - **zod / drizzle-zod**: Schema validation and type inference
 - **ws**: WebSocket server implementation
+- **recharts**: Charts and data visualization for reports
+
+### Features
+- **Dashboard**: Overview with stats, activity timeline, recent screenshots, team status
+- **Screenshots**: Gallery view with filtering and lightbox
+- **Team Management**: Team member list, detail views with activity and time tracking
+- **Time Tracking**: Start/stop timers, project assignment, idle time detection
+- **App/Website Tracking**: Active window monitoring, daily usage summaries
+- **Reports**: Date range analytics with productivity charts, time breakdown, app usage, CSV export
 
 ### Development Tools
 - **Vite**: Development server and build tool

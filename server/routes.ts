@@ -932,5 +932,148 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/reports", async (req, res) => {
+    try {
+      const { startDate, endDate } = req.query;
+      
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: "startDate and endDate are required" });
+      }
+
+      const start = new Date(startDate as string);
+      const end = new Date(endDate as string);
+
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        return res.status(400).json({ error: "Invalid date format" });
+      }
+
+      const members = await storage.getAllTeamMembers();
+      const timeEntries = await storage.getAllTimeEntries(start, end);
+      
+      const timeBreakdown = await Promise.all(
+        members.map(async (member) => {
+          const stats = await storage.getMemberTimeStats(member.id, start, end);
+          const entries = await storage.getTimeEntriesByMember(member.id, start, end);
+          
+          const projectMap = new Map<string, number>();
+          for (const entry of entries) {
+            const projectName = entry.project || "No Project";
+            const duration = entry.duration || 0;
+            projectMap.set(projectName, (projectMap.get(projectName) || 0) + duration);
+          }
+
+          const projects = Array.from(projectMap.entries()).map(([name, duration]) => ({
+            name,
+            duration,
+          }));
+
+          return {
+            memberId: member.id,
+            memberName: member.name,
+            totalTime: stats.totalSeconds,
+            activeTime: stats.totalSeconds - stats.totalIdleSeconds,
+            idleTime: stats.totalIdleSeconds,
+            projects,
+          };
+        })
+      );
+
+      const teamAppUsageMap = new Map<string, { appType: string; totalDuration: number; users: Set<string> }>();
+      
+      for (const member of members) {
+        const appSummary = await storage.getAppUsageSummary(member.id, start, end);
+        for (const app of appSummary) {
+          const existing = teamAppUsageMap.get(app.appName);
+          if (existing) {
+            existing.totalDuration += app.totalDuration;
+            existing.users.add(member.id);
+          } else {
+            teamAppUsageMap.set(app.appName, {
+              appType: app.appType,
+              totalDuration: app.totalDuration,
+              users: new Set([member.id]),
+            });
+          }
+        }
+      }
+
+      const teamAppUsage = Array.from(teamAppUsageMap.entries())
+        .map(([appName, data]) => ({
+          appName,
+          appType: data.appType,
+          totalDuration: data.totalDuration,
+          userCount: data.users.size,
+        }))
+        .sort((a, b) => b.totalDuration - a.totalDuration);
+
+      const dayMap = new Map<string, { activeTime: number; idleTime: number; screenshots: number }>();
+      const currentDate = new Date(start);
+      while (currentDate <= end) {
+        const dateKey = currentDate.toISOString().split("T")[0];
+        dayMap.set(dateKey, { activeTime: 0, idleTime: 0, screenshots: 0 });
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+
+      for (const entry of timeEntries) {
+        if (entry.startTime) {
+          const dateKey = entry.startTime.toISOString().split("T")[0];
+          const dayData = dayMap.get(dateKey);
+          if (dayData) {
+            const duration = entry.duration || 0;
+            const idle = entry.idleSeconds || 0;
+            dayData.activeTime += duration - idle;
+            dayData.idleTime += idle;
+          }
+        }
+      }
+
+      const allScreenshots = await storage.getAllScreenshots();
+      for (const screenshot of allScreenshots) {
+        if (screenshot.capturedAt >= start && screenshot.capturedAt <= end) {
+          const dateKey = screenshot.capturedAt.toISOString().split("T")[0];
+          const dayData = dayMap.get(dateKey);
+          if (dayData) {
+            dayData.screenshots += 1;
+          }
+        }
+      }
+
+      const productivity = Array.from(dayMap.entries())
+        .map(([date, data]) => ({
+          date,
+          activeTime: data.activeTime,
+          idleTime: data.idleTime,
+          screenshots: data.screenshots,
+        }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+      const totalActiveTime = timeBreakdown.reduce((sum, m) => sum + m.activeTime, 0);
+      const totalIdleTime = timeBreakdown.reduce((sum, m) => sum + m.idleTime, 0);
+      const totalScreenshots = productivity.reduce((sum, d) => sum + d.screenshots, 0);
+
+      const screenshotsInRange = allScreenshots.filter(
+        s => s.capturedAt >= start && s.capturedAt <= end
+      );
+      const avgActivityScore = screenshotsInRange.length > 0
+        ? screenshotsInRange.reduce((sum, s) => sum + (s.activityScore || 0), 0) / screenshotsInRange.length
+        : 0;
+
+      res.json({
+        productivity,
+        timeBreakdown: timeBreakdown.filter(m => m.totalTime > 0),
+        teamAppUsage,
+        summary: {
+          totalActiveTime,
+          totalIdleTime,
+          totalScreenshots,
+          avgActivityScore,
+        },
+      });
+    } catch (error) {
+      console.error("Failed to generate report:", error);
+      res.status(500).json({ error: "Failed to generate report" });
+    }
+  });
+
   return httpServer;
 }

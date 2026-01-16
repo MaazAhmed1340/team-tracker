@@ -13,6 +13,7 @@ import Dashboard from "@/pages/dashboard";
 import Screenshots from "@/pages/screenshots";
 import Team from "@/pages/team";
 import TeamMemberDetail from "@/pages/team-member-detail";
+import Reports from "@/pages/reports";
 import Settings from "@/pages/settings";
 import Download from "@/pages/download";
 
@@ -28,6 +29,7 @@ function Router() {
       <Route path="/screenshots" component={Screenshots} />
       <Route path="/team" component={Team} />
       <Route path="/team/:id" component={TeamMemberDetail} />
+      <Route path="/reports" component={Reports} />
       <Route path="/settings" component={Settings} />
       <Route path="/download" component={Download} />
       <Route component={NotFound} />
