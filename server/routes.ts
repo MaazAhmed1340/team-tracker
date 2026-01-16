@@ -207,6 +207,82 @@ export async function registerRoutes(
     }
   });
 
+  const blurScreenshotSchema = z.object({
+    isBlurred: z.boolean(),
+  });
+
+  app.patch("/api/screenshots/:id/blur", async (req, res) => {
+    try {
+      const data = blurScreenshotSchema.parse(req.body);
+      const screenshot = await storage.updateScreenshotBlur(req.params.id, data.isBlurred);
+      if (!screenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+      broadcast({ type: "SCREENSHOT_UPDATED", screenshot });
+      res.json(screenshot);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update screenshot" });
+    }
+  });
+
+  const privacySettingsSchema = z.object({
+    blurScreenshots: z.boolean().optional(),
+    trackApps: z.boolean().optional(),
+    trackUrls: z.boolean().optional(),
+    workHoursStart: z.string().nullable().optional(),
+    workHoursEnd: z.string().nullable().optional(),
+    workHoursTimezone: z.string().optional(),
+    privacyMode: z.boolean().optional(),
+  });
+
+  app.get("/api/team-members/:id/privacy", async (req, res) => {
+    try {
+      const member = await storage.getTeamMember(req.params.id);
+      if (!member) {
+        return res.status(404).json({ error: "Team member not found" });
+      }
+      res.json({
+        blurScreenshots: member.blurScreenshots,
+        trackApps: member.trackApps,
+        trackUrls: member.trackUrls,
+        workHoursStart: member.workHoursStart,
+        workHoursEnd: member.workHoursEnd,
+        workHoursTimezone: member.workHoursTimezone,
+        privacyMode: member.privacyMode,
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get privacy settings" });
+    }
+  });
+
+  app.patch("/api/team-members/:id/privacy", async (req, res) => {
+    try {
+      const data = privacySettingsSchema.parse(req.body);
+      const member = await storage.updateTeamMember(req.params.id, data);
+      if (!member) {
+        return res.status(404).json({ error: "Team member not found" });
+      }
+      broadcast({ type: "PRIVACY_UPDATED", member });
+      res.json({
+        blurScreenshots: member.blurScreenshots,
+        trackApps: member.trackApps,
+        trackUrls: member.trackUrls,
+        workHoursStart: member.workHoursStart,
+        workHoursEnd: member.workHoursEnd,
+        workHoursTimezone: member.workHoursTimezone,
+        privacyMode: member.privacyMode,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update privacy settings" });
+    }
+  });
+
   app.get("/api/activity-logs/:memberId", async (req, res) => {
     try {
       const logs = await storage.getActivityLogs(req.params.memberId);

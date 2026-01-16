@@ -13,6 +13,13 @@ export const teamMembers = pgTable("team_members", {
   lastActiveAt: timestamp("last_active_at"),
   screenshotInterval: integer("screenshot_interval").notNull().default(5),
   isMonitoring: boolean("is_monitoring").notNull().default(true),
+  blurScreenshots: boolean("blur_screenshots").notNull().default(false),
+  trackApps: boolean("track_apps").notNull().default(true),
+  trackUrls: boolean("track_urls").notNull().default(true),
+  workHoursStart: text("work_hours_start"),
+  workHoursEnd: text("work_hours_end"),
+  workHoursTimezone: text("work_hours_timezone").default("UTC"),
+  privacyMode: boolean("privacy_mode").notNull().default(false),
 });
 
 export const screenshots = pgTable("screenshots", {
@@ -23,6 +30,8 @@ export const screenshots = pgTable("screenshots", {
   mouseClicks: integer("mouse_clicks").notNull().default(0),
   keystrokes: integer("keystrokes").notNull().default(0),
   activityScore: real("activity_score").notNull().default(0),
+  isBlurred: boolean("is_blurred").notNull().default(false),
+  isDeleted: boolean("is_deleted").notNull().default(false),
 });
 
 export const activityLogs = pgTable("activity_logs", {

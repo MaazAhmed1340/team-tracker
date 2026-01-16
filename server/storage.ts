@@ -41,6 +41,7 @@ export interface IStorage {
   getScreenshotsByMember(memberId: string): Promise<ScreenshotWithMember[]>;
   createScreenshot(screenshot: InsertScreenshot): Promise<Screenshot>;
   deleteScreenshot(id: string): Promise<boolean>;
+  updateScreenshotBlur(id: string, isBlurred: boolean): Promise<Screenshot | undefined>;
 
   getActivityLogs(memberId: string): Promise<ActivityLog[]>;
   createActivityLog(log: InsertActivityLog): Promise<ActivityLog>;
@@ -252,6 +253,15 @@ export class DatabaseStorage implements IStorage {
   async deleteScreenshot(id: string): Promise<boolean> {
     await db.delete(screenshots).where(eq(screenshots.id, id));
     return true;
+  }
+
+  async updateScreenshotBlur(id: string, isBlurred: boolean): Promise<Screenshot | undefined> {
+    const [updated] = await db
+      .update(screenshots)
+      .set({ isBlurred })
+      .where(eq(screenshots.id, id))
+      .returning();
+    return updated;
   }
 
   async getActivityLogs(memberId: string): Promise<ActivityLog[]> {
