@@ -1,13 +1,16 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { format, formatDistanceToNow } from "date-fns";
-import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause, Monitor, Globe } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause, Monitor, Globe, Shield, Eye, EyeOff } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { StatusIndicator } from "@/components/status-indicator";
 import { ScreenshotCard } from "@/components/screenshot-card";
 import { ScreenshotLightbox } from "@/components/screenshot-lightbox";
@@ -18,6 +21,8 @@ import {
   TimelineSkeleton,
 } from "@/components/loading-skeleton";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { TeamMember, ScreenshotWithMember, TimeEntry, AppUsage, AppUsageSummary } from "@shared/schema";
 
 interface TimeStats {
@@ -44,10 +49,21 @@ interface AppUsageData {
   activeApp: AppUsage | null;
 }
 
+interface PrivacySettings {
+  blurScreenshots: boolean;
+  trackApps: boolean;
+  trackUrls: boolean;
+  workHoursStart: string | null;
+  workHoursEnd: string | null;
+  workHoursTimezone: string;
+  privacyMode: boolean;
+}
+
 export default function TeamMemberDetail() {
   const [, navigate] = useLocation();
   const [, params] = useRoute("/team/:id");
   const memberId = params?.id;
+  const { toast } = useToast();
 
   const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotWithMember | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -96,6 +112,36 @@ export default function TeamMemberDetail() {
     enabled: !!memberId,
     refetchInterval: 30000,
   });
+
+  const { data: privacySettings, isLoading: privacyLoading } = useQuery<PrivacySettings>({
+    queryKey: ["/api/team-members", memberId, "privacy"],
+    enabled: !!memberId,
+  });
+
+  const privacyMutation = useMutation({
+    mutationFn: async (updates: Partial<PrivacySettings>) => {
+      return apiRequest("PATCH", `/api/team-members/${memberId}/privacy`, updates);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/team-members", memberId, "privacy"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/team-members", memberId] });
+      toast({
+        title: "Privacy settings updated",
+        description: "The changes have been saved.",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to update privacy settings.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handlePrivacyToggle = (key: keyof PrivacySettings, value: boolean) => {
+    privacyMutation.mutate({ [key]: value });
+  };
 
   const formatTimeTracked = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -493,6 +539,96 @@ export default function TeamMemberDetail() {
                       title="No app data yet"
                       description="App usage will appear here once tracking begins"
                     />
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card data-testid="card-privacy-settings">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-lg font-medium">
+                <Shield className="h-4 w-4" />
+                Privacy Settings
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Configure monitoring and privacy options for this member
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {privacyLoading ? (
+                <div className="flex flex-col gap-3">
+                  <Skeleton className="h-10 w-full" />
+                  <Skeleton className="h-10 w-full" />
+                  <Skeleton className="h-10 w-full" />
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div className="flex items-center gap-2">
+                      {privacySettings?.privacyMode ? (
+                        <EyeOff className="h-4 w-4 text-orange-500" />
+                      ) : (
+                        <Eye className="h-4 w-4 text-muted-foreground" />
+                      )}
+                      <div>
+                        <Label className="text-sm font-medium">Privacy Mode</Label>
+                        <p className="text-xs text-muted-foreground">Pause all monitoring temporarily</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={privacySettings?.privacyMode ?? false}
+                      onCheckedChange={(checked) => handlePrivacyToggle("privacyMode", checked)}
+                      disabled={privacyMutation.isPending}
+                      data-testid="switch-privacy-mode"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div>
+                      <Label className="text-sm font-medium">Blur Screenshots</Label>
+                      <p className="text-xs text-muted-foreground">Auto-blur new screenshots</p>
+                    </div>
+                    <Switch
+                      checked={privacySettings?.blurScreenshots ?? false}
+                      onCheckedChange={(checked) => handlePrivacyToggle("blurScreenshots", checked)}
+                      disabled={privacyMutation.isPending}
+                      data-testid="switch-blur-screenshots"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div>
+                      <Label className="text-sm font-medium">Track Applications</Label>
+                      <p className="text-xs text-muted-foreground">Monitor active applications</p>
+                    </div>
+                    <Switch
+                      checked={privacySettings?.trackApps ?? true}
+                      onCheckedChange={(checked) => handlePrivacyToggle("trackApps", checked)}
+                      disabled={privacyMutation.isPending}
+                      data-testid="switch-track-apps"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div>
+                      <Label className="text-sm font-medium">Track URLs</Label>
+                      <p className="text-xs text-muted-foreground">Monitor browser URLs</p>
+                    </div>
+                    <Switch
+                      checked={privacySettings?.trackUrls ?? true}
+                      onCheckedChange={(checked) => handlePrivacyToggle("trackUrls", checked)}
+                      disabled={privacyMutation.isPending}
+                      data-testid="switch-track-urls"
+                    />
+                  </div>
+
+                  {privacySettings?.privacyMode && (
+                    <div className="p-3 rounded-lg bg-orange-500/10 border border-orange-500/20">
+                      <p className="text-xs text-orange-600 dark:text-orange-400 font-medium">
+                        Privacy mode is active. No data is being collected for this member.
+                      </p>
+                    </div>
                   )}
                 </div>
               )}
