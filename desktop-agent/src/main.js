@@ -10,9 +10,14 @@ let tray = null;
 let isMonitoring = false;
 let captureInterval = null;
 let activityTracker = null;
+let idleCheckInterval = null;
 
 let mouseClicks = 0;
 let keystrokes = 0;
+let lastActivityTime = Date.now();
+let timerRunning = false;
+let timerStartTime = null;
+let currentTimerEntry = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -239,6 +244,159 @@ function toggleMonitoring() {
   }
 }
 
+async function startTimer(project = null, notes = null) {
+  const token = store.get('authToken');
+  if (!token) return { success: false, error: 'Not logged in' };
+
+  try {
+    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ project, notes })
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      if (error.activeEntry) {
+        currentTimerEntry = error.activeEntry;
+        timerRunning = true;
+        timerStartTime = new Date(error.activeEntry.startTime);
+        return { success: true, entry: error.activeEntry, alreadyRunning: true };
+      }
+      throw new Error(error.error || 'Failed to start timer');
+    }
+
+    const entry = await response.json();
+    currentTimerEntry = entry;
+    timerRunning = true;
+    timerStartTime = new Date(entry.startTime);
+    lastActivityTime = Date.now();
+
+    startIdleDetection();
+    updateTrayMenu();
+
+    if (mainWindow) {
+      mainWindow.webContents.send('timer-status', { running: true, entry });
+    }
+
+    return { success: true, entry };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function stopTimer() {
+  const token = store.get('authToken');
+  if (!token) return { success: false, error: 'Not logged in' };
+
+  try {
+    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/stop`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to stop timer');
+    }
+
+    const entry = await response.json();
+    timerRunning = false;
+    timerStartTime = null;
+    currentTimerEntry = null;
+
+    stopIdleDetection();
+    updateTrayMenu();
+
+    if (mainWindow) {
+      mainWindow.webContents.send('timer-status', { running: false, entry });
+    }
+
+    return { success: true, entry };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function getTimerStatus() {
+  const token = store.get('authToken');
+  if (!token) return null;
+
+  try {
+    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/status`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (response.ok) {
+      const status = await response.json();
+      timerRunning = status.isRunning;
+      currentTimerEntry = status.activeEntry;
+      timerStartTime = status.activeEntry ? new Date(status.activeEntry.startTime) : null;
+
+      if (timerRunning) {
+        startIdleDetection();
+      }
+
+      return status;
+    }
+  } catch (error) {
+    console.error('Failed to get timer status:', error);
+  }
+  return null;
+}
+
+function startIdleDetection() {
+  if (idleCheckInterval) return;
+
+  const settings = store.get('settings') || { idleThreshold: 5 };
+  const idleThresholdMs = (settings.idleThreshold || 5) * 60 * 1000;
+
+  idleCheckInterval = setInterval(async () => {
+    const now = Date.now();
+    const idleTime = now - lastActivityTime;
+
+    if (idleTime > idleThresholdMs && timerRunning) {
+      const idleSeconds = Math.floor(idleTime / 1000);
+      await reportIdleTime(idleSeconds);
+    }
+  }, 60000);
+}
+
+function stopIdleDetection() {
+  if (idleCheckInterval) {
+    clearInterval(idleCheckInterval);
+    idleCheckInterval = null;
+  }
+}
+
+async function reportIdleTime(idleSeconds) {
+  const token = store.get('authToken');
+  if (!token) return;
+
+  try {
+    await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/idle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ idleSeconds })
+    });
+  } catch (error) {
+    console.error('Failed to report idle time:', error);
+  }
+}
+
+function recordActivity() {
+  lastActivityTime = Date.now();
+}
+
 ipcMain.handle('login', async (event, { serverUrl, teamMemberId, deviceName, platform }) => {
   try {
     store.set('apiUrl', serverUrl);
@@ -279,15 +437,6 @@ ipcMain.handle('logout', async () => {
   return { success: true };
 });
 
-ipcMain.handle('get-status', () => {
-  return {
-    isLoggedIn: !!store.get('authToken'),
-    isMonitoring,
-    userName: store.get('userName'),
-    settings: store.get('settings')
-  };
-});
-
 ipcMain.handle('start-monitoring', () => {
   startMonitoring();
   return { success: true };
@@ -317,6 +466,36 @@ ipcMain.handle('get-settings', async () => {
   }
   
   return store.get('settings');
+});
+
+ipcMain.handle('start-timer', async (event, { project, notes }) => {
+  return await startTimer(project, notes);
+});
+
+ipcMain.handle('stop-timer', async () => {
+  return await stopTimer();
+});
+
+ipcMain.handle('get-timer-status', async () => {
+  return await getTimerStatus();
+});
+
+ipcMain.handle('record-activity', () => {
+  recordActivity();
+  mouseClicks++;
+  return { success: true };
+});
+
+ipcMain.handle('get-status', () => {
+  return {
+    isLoggedIn: !!store.get('authToken'),
+    isMonitoring,
+    isTimerRunning: timerRunning,
+    timerStartTime,
+    currentTimerEntry,
+    userName: store.get('userName'),
+    settings: store.get('settings')
+  };
 });
 
 app.whenReady().then(() => {

@@ -269,6 +269,102 @@
     .footer-actions {
       margin-top: auto;
     }
+
+    .timer-card {
+      background: linear-gradient(135deg, #2d3436 0%, #2c3e50 100%);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+      text-align: center;
+      border: 1px solid #3a3a4a;
+    }
+
+    .timer-display {
+      font-size: 42px;
+      font-weight: 700;
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+      margin-bottom: 8px;
+      letter-spacing: 2px;
+    }
+
+    .timer-display.running {
+      color: #2ecc71;
+    }
+
+    .timer-display.stopped {
+      color: #95a5a6;
+    }
+
+    .timer-label {
+      font-size: 12px;
+      color: #a0a0a0;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    .timer-project {
+      font-size: 14px;
+      color: #667eea;
+      margin-bottom: 16px;
+    }
+
+    .timer-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .timer-buttons .btn {
+      flex: 1;
+    }
+
+    .btn-success {
+      background: #2ecc71;
+      color: #fff;
+    }
+
+    .btn-success:hover {
+      background: #27ae60;
+    }
+
+    .timer-stats {
+      display: flex;
+      justify-content: space-around;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #3a3a4a;
+    }
+
+    .timer-stat {
+      text-align: center;
+    }
+
+    .timer-stat-value {
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .timer-stat-label {
+      font-size: 11px;
+      color: #a0a0a0;
+      text-transform: uppercase;
+    }
+
+    .project-input {
+      background: rgba(0,0,0,0.2);
+      border: 1px solid #3a3a4a;
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: #fff;
+      font-size: 13px;
+      width: 100%;
+      margin-bottom: 12px;
+    }
+
+    .project-input::placeholder {
+      color: #6a6a7a;
+    }
   </style>
 </head>
 <body>
@@ -317,6 +413,30 @@
         <div class="user-details">
           <div class="user-name" id="user-name">John Doe</div>
           <div class="user-status" id="user-status">Connected</div>
+        </div>
+      </div>
+
+      <div class="timer-card">
+        <div class="timer-label">Time Tracked Today</div>
+        <div class="timer-display stopped" id="timer-display">00:00:00</div>
+        <input type="text" class="project-input" id="timer-project" placeholder="Project name (optional)">
+        <div class="timer-buttons">
+          <button class="btn btn-success" id="start-timer-btn">Start Timer</button>
+          <button class="btn btn-danger" id="stop-timer-btn" style="display: none;">Stop Timer</button>
+        </div>
+        <div class="timer-stats">
+          <div class="timer-stat">
+            <div class="timer-stat-value" id="today-hours">0h</div>
+            <div class="timer-stat-label">Today</div>
+          </div>
+          <div class="timer-stat">
+            <div class="timer-stat-value" id="idle-time">0m</div>
+            <div class="timer-stat-label">Idle</div>
+          </div>
+          <div class="timer-stat">
+            <div class="timer-stat-value" id="entries-count">0</div>
+            <div class="timer-stat-label">Entries</div>
+          </div>
         </div>
       </div>
 
@@ -372,7 +492,91 @@
     const refreshSettingsBtn = document.getElementById('refresh-settings-btn');
     const logoutBtn = document.getElementById('logout-btn');
 
+    const timerDisplay = document.getElementById('timer-display');
+    const timerProject = document.getElementById('timer-project');
+    const startTimerBtn = document.getElementById('start-timer-btn');
+    const stopTimerBtn = document.getElementById('stop-timer-btn');
+    const todayHours = document.getElementById('today-hours');
+    const idleTime = document.getElementById('idle-time');
+    const entriesCount = document.getElementById('entries-count');
+
     let isMonitoring = false;
+    let isTimerRunning = false;
+    let timerStartTime = null;
+    let timerInterval = null;
+
+    function formatDuration(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = seconds % 60;
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+
+    function formatHours(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+      }
+      return `${minutes}m`;
+    }
+
+    function updateTimerDisplay() {
+      if (!isTimerRunning || !timerStartTime) return;
+      
+      const now = new Date();
+      const start = new Date(timerStartTime);
+      const elapsed = Math.floor((now - start) / 1000);
+      timerDisplay.textContent = formatDuration(elapsed);
+    }
+
+    function startTimerUI(entry) {
+      isTimerRunning = true;
+      timerStartTime = entry.startTime;
+      timerDisplay.classList.remove('stopped');
+      timerDisplay.classList.add('running');
+      startTimerBtn.style.display = 'none';
+      stopTimerBtn.style.display = 'block';
+      timerProject.disabled = true;
+      if (entry.project) {
+        timerProject.value = entry.project;
+      }
+
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(updateTimerDisplay, 1000);
+      updateTimerDisplay();
+    }
+
+    function stopTimerUI() {
+      isTimerRunning = false;
+      timerStartTime = null;
+      timerDisplay.textContent = '00:00:00';
+      timerDisplay.classList.remove('running');
+      timerDisplay.classList.add('stopped');
+      startTimerBtn.style.display = 'block';
+      stopTimerBtn.style.display = 'none';
+      timerProject.disabled = false;
+      timerProject.value = '';
+
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+    }
+
+    async function updateTimerStats() {
+      const timerStatus = await window.electronAPI.getTimerStatus();
+      if (timerStatus) {
+        if (timerStatus.isRunning && timerStatus.activeEntry) {
+          startTimerUI(timerStatus.activeEntry);
+        }
+        if (timerStatus.todayStats) {
+          todayHours.textContent = formatHours(timerStatus.todayStats.totalSeconds);
+          idleTime.textContent = formatHours(timerStatus.todayStats.totalIdleSeconds);
+          entriesCount.textContent = timerStatus.todayStats.entriesCount;
+        }
+      }
+    }
 
     function showPage(page) {
       loginPage.classList.remove('active');
@@ -441,6 +645,7 @@
         updateUserUI(status.userName);
         updateMonitoringUI(status.isMonitoring);
         await updateSettingsUI();
+        await updateTimerStats();
         showPage('dashboard');
       } else {
         showPage('login');
@@ -491,6 +696,46 @@
         await window.electronAPI.startMonitoring();
         updateMonitoringUI(true);
       }
+    });
+
+    startTimerBtn.addEventListener('click', async () => {
+      startTimerBtn.disabled = true;
+      startTimerBtn.textContent = 'Starting...';
+
+      const project = timerProject.value.trim() || null;
+      const result = await window.electronAPI.startTimer({ project });
+
+      startTimerBtn.disabled = false;
+      startTimerBtn.textContent = 'Start Timer';
+
+      if (result.success && result.entry) {
+        startTimerUI(result.entry);
+        await updateTimerStats();
+      }
+    });
+
+    stopTimerBtn.addEventListener('click', async () => {
+      stopTimerBtn.disabled = true;
+      stopTimerBtn.textContent = 'Stopping...';
+
+      const result = await window.electronAPI.stopTimer();
+
+      stopTimerBtn.disabled = false;
+      stopTimerBtn.textContent = 'Stop Timer';
+
+      if (result.success) {
+        stopTimerUI();
+        await updateTimerStats();
+      }
+    });
+
+    window.electronAPI.onTimerStatus((status) => {
+      if (status.running && status.entry) {
+        startTimerUI(status.entry);
+      } else {
+        stopTimerUI();
+      }
+      updateTimerStats();
     });
 
     refreshSettingsBtn.addEventListener('click', async () => {
