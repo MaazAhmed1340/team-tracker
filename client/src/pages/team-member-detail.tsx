@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { format, formatDistanceToNow } from "date-fns";
-import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause } from "lucide-react";
+import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause, Monitor, Globe } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -18,7 +18,7 @@ import {
   TimelineSkeleton,
 } from "@/components/loading-skeleton";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { TeamMember, ScreenshotWithMember, TimeEntry } from "@shared/schema";
+import type { TeamMember, ScreenshotWithMember, TimeEntry, AppUsage, AppUsageSummary } from "@shared/schema";
 
 interface TimeStats {
   totalSeconds: number;
@@ -37,6 +37,11 @@ interface MemberStats {
 interface TimelineData {
   hour: number;
   activityLevel: "high" | "medium" | "low" | "none";
+}
+
+interface AppUsageData {
+  summary: AppUsageSummary[];
+  activeApp: AppUsage | null;
 }
 
 export default function TeamMemberDetail() {
@@ -84,6 +89,12 @@ export default function TeamMemberDetail() {
     queryKey: ["/api/time-entries/active", memberId],
     enabled: !!memberId,
     refetchInterval: 60000,
+  });
+
+  const { data: appUsage, isLoading: appUsageLoading } = useQuery<AppUsageData>({
+    queryKey: ["/api/team-members", memberId, "app-usage"],
+    enabled: !!memberId,
+    refetchInterval: 30000,
   });
 
   const formatTimeTracked = (seconds: number) => {
@@ -149,9 +160,11 @@ export default function TeamMemberDetail() {
           <h1 className="text-3xl font-bold">
             {memberLoading ? <Skeleton className="h-9 w-48" /> : member?.name}
           </h1>
-          <p className="text-muted-foreground">
-            {memberLoading ? <Skeleton className="h-5 w-64 mt-1" /> : "Team member activity details"}
-          </p>
+          {memberLoading ? (
+            <Skeleton className="h-5 w-64 mt-1" />
+          ) : (
+            <p className="text-muted-foreground">Team member activity details</p>
+          )}
         </div>
       </div>
 
@@ -411,6 +424,75 @@ export default function TeamMemberDetail() {
                         ))}
                       </div>
                     </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card data-testid="card-app-usage">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-lg font-medium">
+                <Monitor className="h-4 w-4" />
+                App Usage
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {appUsageLoading ? (
+                <div className="flex flex-col gap-3">
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-1/2" />
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  {appUsage?.activeApp && (
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+                      {appUsage.activeApp.appType === "website" ? (
+                        <Globe className="h-4 w-4 text-green-500" />
+                      ) : (
+                        <Monitor className="h-4 w-4 text-green-500" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{appUsage.activeApp.appName}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {appUsage.activeApp.windowTitle || "Active now"}
+                        </p>
+                      </div>
+                      <Badge variant="secondary" className="text-xs shrink-0">Now</Badge>
+                    </div>
+                  )}
+                  {appUsage?.summary && appUsage.summary.length > 0 ? (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-xs font-medium text-muted-foreground">Today's Usage</p>
+                      <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
+                        {appUsage.summary.slice(0, 8).map((app, index) => (
+                          <div
+                            key={`${app.appName}-${index}`}
+                            className="flex items-center justify-between text-xs p-2 rounded bg-muted/50"
+                            data-testid={`app-usage-${index}`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                              {app.appType === "website" ? (
+                                <Globe className="h-3 w-3 text-muted-foreground shrink-0" />
+                              ) : (
+                                <Monitor className="h-3 w-3 text-muted-foreground shrink-0" />
+                              )}
+                              <span className="font-medium truncate">{app.appName}</span>
+                            </div>
+                            <span className="font-semibold shrink-0 ml-2">
+                              {formatTimeTracked(app.totalDuration)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <EmptyState
+                      icon={Monitor}
+                      title="No app data yet"
+                      description="App usage will appear here once tracking begins"
+                    />
                   )}
                 </div>
               )}
