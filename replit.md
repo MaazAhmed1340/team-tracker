@@ -84,11 +84,25 @@ Preferred communication style: Simple, everyday language.
 
 ### Features
 - **Dashboard**: Overview with stats, activity timeline, recent screenshots, team status
-- **Screenshots**: Gallery view with filtering and lightbox
+- **Screenshots**: Gallery view with filtering, lightbox, blur/unblur and soft-delete functionality
 - **Team Management**: Team member list, detail views with activity and time tracking
 - **Time Tracking**: Start/stop timers, project assignment, idle time detection
 - **App/Website Tracking**: Active window monitoring, daily usage summaries
 - **Reports**: Date range analytics with productivity charts, time breakdown, app usage, CSV export
+- **Privacy Controls**: Per-member privacy settings including:
+  - Privacy Mode: Temporarily disable all monitoring
+  - Blur Screenshots: Automatically blur captured screenshots for privacy
+  - Track Apps: Enable/disable application tracking
+  - Track URLs: Enable/disable website URL tracking
+  - Work Hours: Define monitoring active hours (future enhancement)
+
+### Privacy Controls Architecture
+- Settings are stored per team member in the database
+- Desktop agent receives privacy settings via heartbeat response
+- Agent checks `privacyMode` before capturing screenshots
+- Agent checks `trackApps` and `trackUrls` before logging application usage
+- Managers can blur/delete individual screenshots from the gallery
+- Screenshots use soft delete (isDeleted flag) to maintain data integrity
 
 ### Development Tools
 - **Vite**: Development server and build tool
