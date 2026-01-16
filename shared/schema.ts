@@ -37,6 +37,7 @@ export const teamMembersRelations = relations(teamMembers, ({ many }) => ({
   screenshots: many(screenshots),
   activityLogs: many(activityLogs),
   timeEntries: many(timeEntries),
+  appUsage: many(appUsage),
 }));
 
 export const screenshotsRelations = relations(screenshots, ({ one }) => ({
@@ -87,6 +88,26 @@ export const agentTokens = pgTable("agent_tokens", {
 export const agentTokensRelations = relations(agentTokens, ({ one }) => ({
   teamMember: one(teamMembers, {
     fields: [agentTokens.teamMemberId],
+    references: [teamMembers.id],
+  }),
+}));
+
+export const appUsage = pgTable("app_usage", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teamMemberId: varchar("team_member_id").notNull().references(() => teamMembers.id, { onDelete: "cascade" }),
+  appName: text("app_name").notNull(),
+  appType: text("app_type").notNull().default("application"),
+  windowTitle: text("window_title"),
+  url: text("url"),
+  startTime: timestamp("start_time").notNull(),
+  endTime: timestamp("end_time"),
+  durationSeconds: integer("duration_seconds").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+});
+
+export const appUsageRelations = relations(appUsage, ({ one }) => ({
+  teamMember: one(teamMembers, {
+    fields: [appUsage.teamMemberId],
     references: [teamMembers.id],
   }),
 }));
@@ -150,4 +171,18 @@ export type AgentToken = typeof agentTokens.$inferSelect;
 
 export type AgentTokenWithMember = AgentToken & {
   teamMember: TeamMember;
+};
+
+export const insertAppUsageSchema = createInsertSchema(appUsage).omit({
+  id: true,
+});
+
+export type InsertAppUsage = z.infer<typeof insertAppUsageSchema>;
+export type AppUsage = typeof appUsage.$inferSelect;
+
+export type AppUsageSummary = {
+  appName: string;
+  appType: string;
+  totalDuration: number;
+  sessionCount: number;
 };
