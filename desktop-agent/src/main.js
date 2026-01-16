@@ -116,6 +116,12 @@ function updateTrayMenu() {
 
 async function captureScreenshot() {
   try {
+    const privacy = store.get('privacy') || {};
+    if (privacy.privacyMode) {
+      console.log('Privacy mode enabled, skipping screenshot capture');
+      return;
+    }
+
     const screenshot = require('screenshot-desktop');
     const displays = await screenshot.listDisplays();
     const primaryDisplay = displays[0];
@@ -192,6 +198,12 @@ async function sendHeartbeat() {
       const data = await response.json();
       if (data.settings) {
         store.set('settings', data.settings);
+      }
+      if (data.privacy) {
+        store.set('privacy', data.privacy);
+        if (mainWindow) {
+          mainWindow.webContents.send('privacy-settings', data.privacy);
+        }
       }
     }
   } catch (error) {
@@ -465,9 +477,26 @@ async function reportAppUsage(windowInfo) {
 }
 
 async function trackActiveApp() {
+  const privacy = store.get('privacy') || { trackApps: true, trackUrls: true };
+  
+  if (privacy.privacyMode) {
+    console.log('Privacy mode enabled, skipping app tracking');
+    return;
+  }
+  
+  if (privacy.trackApps === false) {
+    console.log('App tracking disabled, skipping');
+    return;
+  }
+
   const windowInfo = await getActiveWindowInfo();
   
   if (!windowInfo) return;
+  
+  if (!privacy.trackUrls && windowInfo.appType === 'website') {
+    console.log('URL tracking disabled, skipping website tracking');
+    return;
+  }
   
   const appKey = `${windowInfo.appName}|${windowInfo.windowTitle}`;
   if (appKey !== lastActiveApp) {

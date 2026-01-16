@@ -506,14 +506,24 @@ export async function registerRoutes(
       }
 
       const settings = await storage.getSettings();
+      const updatedMember = await storage.getTeamMember(agentToken.teamMember.id);
 
       res.json({
         success: true,
         settings: {
-          screenshotInterval: settings.screenshotInterval,
+          screenshotInterval: updatedMember?.screenshotInterval || settings.screenshotInterval,
           enableActivityTracking: settings.enableActivityTracking,
           enableMouseTracking: settings.enableMouseTracking,
           enableKeyboardTracking: settings.enableKeyboardTracking,
+        },
+        privacy: {
+          privacyMode: updatedMember?.privacyMode ?? false,
+          blurScreenshots: updatedMember?.blurScreenshots ?? false,
+          trackApps: updatedMember?.trackApps ?? true,
+          trackUrls: updatedMember?.trackUrls ?? true,
+          workHoursStart: updatedMember?.workHoursStart,
+          workHoursEnd: updatedMember?.workHoursEnd,
+          workHoursTimezone: updatedMember?.workHoursTimezone || "UTC",
         },
       });
     } catch (error) {
@@ -547,6 +557,15 @@ export async function registerRoutes(
         enableMouseTracking: settings.enableMouseTracking,
         enableKeyboardTracking: settings.enableKeyboardTracking,
         isMonitoring: member.isMonitoring,
+        privacy: {
+          privacyMode: member.privacyMode ?? false,
+          blurScreenshots: member.blurScreenshots ?? false,
+          trackApps: member.trackApps ?? true,
+          trackUrls: member.trackUrls ?? true,
+          workHoursStart: member.workHoursStart,
+          workHoursEnd: member.workHoursEnd,
+          workHoursTimezone: member.workHoursTimezone || "UTC",
+        },
       });
     } catch (error) {
       res.status(500).json({ error: "Failed to get agent settings" });
