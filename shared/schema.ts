@@ -36,6 +36,7 @@ export const activityLogs = pgTable("activity_logs", {
 export const teamMembersRelations = relations(teamMembers, ({ many }) => ({
   screenshots: many(screenshots),
   activityLogs: many(activityLogs),
+  timeEntries: many(timeEntries),
 }));
 
 export const screenshotsRelations = relations(screenshots, ({ one }) => ({
@@ -48,6 +49,26 @@ export const screenshotsRelations = relations(screenshots, ({ one }) => ({
 export const activityLogsRelations = relations(activityLogs, ({ one }) => ({
   teamMember: one(teamMembers, {
     fields: [activityLogs.teamMemberId],
+    references: [teamMembers.id],
+  }),
+}));
+
+export const timeEntries = pgTable("time_entries", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teamMemberId: varchar("team_member_id").notNull().references(() => teamMembers.id, { onDelete: "cascade" }),
+  startTime: timestamp("start_time").notNull(),
+  endTime: timestamp("end_time"),
+  duration: integer("duration"),
+  project: text("project"),
+  notes: text("notes"),
+  isActive: boolean("is_active").notNull().default(true),
+  idleSeconds: integer("idle_seconds").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const timeEntriesRelations = relations(timeEntries, ({ one }) => ({
+  teamMember: one(teamMembers, {
+    fields: [timeEntries.teamMemberId],
     references: [teamMembers.id],
   }),
 }));
@@ -93,6 +114,18 @@ export type Screenshot = typeof screenshots.$inferSelect;
 
 export type InsertActivityLog = z.infer<typeof insertActivityLogSchema>;
 export type ActivityLog = typeof activityLogs.$inferSelect;
+
+export const insertTimeEntrySchema = createInsertSchema(timeEntries).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertTimeEntry = z.infer<typeof insertTimeEntrySchema>;
+export type TimeEntry = typeof timeEntries.$inferSelect;
+
+export type TimeEntryWithMember = TimeEntry & {
+  teamMember: TeamMember;
+};
 
 export type ScreenshotWithMember = Screenshot & {
   teamMember: TeamMember;

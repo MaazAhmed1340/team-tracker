@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { insertTeamMemberSchema, insertScreenshotSchema, insertActivityLogSchema } from "@shared/schema";
+import { insertTeamMemberSchema, insertScreenshotSchema, insertActivityLogSchema, insertTimeEntrySchema } from "@shared/schema";
 import { z } from "zod";
 import { randomBytes } from "crypto";
 import * as fs from "fs";
@@ -540,6 +540,312 @@ export async function registerRoutes(
         return res.status(400).json({ error: error.errors });
       }
       res.status(500).json({ error: "Failed to update settings" });
+    }
+  });
+
+  app.get("/api/time-entries", async (req, res) => {
+    try {
+      const memberId = req.query.memberId as string | undefined;
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
+
+      if (memberId) {
+        const entries = await storage.getTimeEntriesByMember(memberId, startDate, endDate);
+        return res.json(entries);
+      }
+
+      const entries = await storage.getAllTimeEntries(startDate, endDate);
+      res.json(entries);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get time entries" });
+    }
+  });
+
+  app.get("/api/time-entries/active/:memberId", async (req, res) => {
+    try {
+      const entry = await storage.getActiveTimeEntry(req.params.memberId);
+      res.json(entry || null);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get active time entry" });
+    }
+  });
+
+  app.get("/api/team-members/:id/time-stats", async (req, res) => {
+    try {
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
+      const stats = await storage.getMemberTimeStats(req.params.id, startDate, endDate);
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get time stats" });
+    }
+  });
+
+  const startTimerSchema = z.object({
+    teamMemberId: z.string().min(1),
+    project: z.string().optional(),
+    notes: z.string().optional(),
+  });
+
+  app.post("/api/time-entries/start", async (req, res) => {
+    try {
+      const data = startTimerSchema.parse(req.body);
+
+      const existingActive = await storage.getActiveTimeEntry(data.teamMemberId);
+      if (existingActive) {
+        return res.status(400).json({ error: "Timer already running", activeEntry: existingActive });
+      }
+
+      const entry = await storage.createTimeEntry({
+        teamMemberId: data.teamMemberId,
+        startTime: new Date(),
+        project: data.project || null,
+        notes: data.notes || null,
+        isActive: true,
+        idleSeconds: 0,
+      });
+
+      await storage.updateTeamMember(data.teamMemberId, { status: "online" });
+
+      broadcast({ type: "TIMER_STARTED", entry });
+      res.status(201).json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to start timer" });
+    }
+  });
+
+  app.post("/api/time-entries/:id/stop", async (req, res) => {
+    try {
+      const entry = await storage.stopTimeEntry(req.params.id);
+      if (!entry) {
+        return res.status(404).json({ error: "Time entry not found" });
+      }
+
+      broadcast({ type: "TIMER_STOPPED", entry });
+      res.json(entry);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to stop timer" });
+    }
+  });
+
+  const updateTimeEntrySchema = z.object({
+    project: z.string().optional(),
+    notes: z.string().optional(),
+    idleSeconds: z.number().int().min(0).optional(),
+  });
+
+  app.patch("/api/time-entries/:id", async (req, res) => {
+    try {
+      const data = updateTimeEntrySchema.parse(req.body);
+      const entry = await storage.updateTimeEntry(req.params.id, data);
+      if (!entry) {
+        return res.status(404).json({ error: "Time entry not found" });
+      }
+      broadcast({ type: "TIME_ENTRY_UPDATED", entry });
+      res.json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update time entry" });
+    }
+  });
+
+  const manualTimeEntrySchema = z.object({
+    teamMemberId: z.string().min(1),
+    startTime: z.string().datetime(),
+    endTime: z.string().datetime(),
+    project: z.string().optional(),
+    notes: z.string().optional(),
+  });
+
+  app.post("/api/time-entries/manual", async (req, res) => {
+    try {
+      const data = manualTimeEntrySchema.parse(req.body);
+      const startTime = new Date(data.startTime);
+      const endTime = new Date(data.endTime);
+      const duration = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+
+      if (duration <= 0) {
+        return res.status(400).json({ error: "End time must be after start time" });
+      }
+
+      const entry = await storage.createTimeEntry({
+        teamMemberId: data.teamMemberId,
+        startTime,
+        endTime,
+        duration,
+        project: data.project || null,
+        notes: data.notes || null,
+        isActive: false,
+        idleSeconds: 0,
+      });
+
+      broadcast({ type: "TIME_ENTRY_ADDED", entry });
+      res.status(201).json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create time entry" });
+    }
+  });
+
+  app.delete("/api/time-entries/:id", async (req, res) => {
+    try {
+      await storage.deleteTimeEntry(req.params.id);
+      broadcast({ type: "TIME_ENTRY_DELETED", id: req.params.id });
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete time entry" });
+    }
+  });
+
+  const agentTimerStartSchema = z.object({
+    project: z.string().optional(),
+    notes: z.string().optional(),
+  });
+
+  app.post("/api/agent/timer/start", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const data = agentTimerStartSchema.parse(req.body);
+
+      const existingActive = await storage.getActiveTimeEntry(agentToken.teamMember.id);
+      if (existingActive) {
+        return res.status(400).json({ error: "Timer already running", activeEntry: existingActive });
+      }
+
+      const entry = await storage.createTimeEntry({
+        teamMemberId: agentToken.teamMember.id,
+        startTime: new Date(),
+        project: data.project || null,
+        notes: data.notes || null,
+        isActive: true,
+        idleSeconds: 0,
+      });
+
+      await storage.updateTeamMember(agentToken.teamMember.id, { status: "online" });
+      await storage.updateAgentTokenLastSeen(agentToken.id);
+
+      broadcast({ type: "TIMER_STARTED", entry });
+      res.status(201).json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to start timer" });
+    }
+  });
+
+  app.post("/api/agent/timer/stop", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const activeEntry = await storage.getActiveTimeEntry(agentToken.teamMember.id);
+      if (!activeEntry) {
+        return res.status(404).json({ error: "No active timer found" });
+      }
+
+      const entry = await storage.stopTimeEntry(activeEntry.id);
+      await storage.updateAgentTokenLastSeen(agentToken.id);
+
+      broadcast({ type: "TIMER_STOPPED", entry });
+      res.json(entry);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to stop timer" });
+    }
+  });
+
+  app.get("/api/agent/timer/status", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const activeEntry = await storage.getActiveTimeEntry(agentToken.teamMember.id);
+      
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStats = await storage.getMemberTimeStats(agentToken.teamMember.id, today);
+
+      res.json({
+        isRunning: !!activeEntry,
+        activeEntry,
+        todayStats,
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get timer status" });
+    }
+  });
+
+  const agentIdleUpdateSchema = z.object({
+    idleSeconds: z.number().int().min(0),
+  });
+
+  app.post("/api/agent/timer/idle", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing authorization token" });
+      }
+
+      const token = authHeader.slice(7);
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      const data = agentIdleUpdateSchema.parse(req.body);
+
+      const activeEntry = await storage.getActiveTimeEntry(agentToken.teamMember.id);
+      if (!activeEntry) {
+        return res.status(404).json({ error: "No active timer found" });
+      }
+
+      const entry = await storage.updateTimeEntry(activeEntry.id, {
+        idleSeconds: (activeEntry.idleSeconds || 0) + data.idleSeconds,
+      });
+
+      res.json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update idle time" });
     }
   });
 

@@ -3,6 +3,7 @@ import {
   screenshots,
   activityLogs,
   agentTokens,
+  timeEntries,
   type TeamMember,
   type InsertTeamMember,
   type Screenshot,
@@ -11,9 +12,12 @@ import {
   type InsertActivityLog,
   type AgentToken,
   type InsertAgentToken,
+  type TimeEntry,
+  type InsertTimeEntry,
   type TeamMemberWithStats,
   type ScreenshotWithMember,
   type AgentTokenWithMember,
+  type TimeEntryWithMember,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
@@ -42,6 +46,20 @@ export interface IStorage {
   updateAgentTokenLastSeen(id: string): Promise<void>;
   getAgentTokensByMember(memberId: string): Promise<AgentToken[]>;
   deactivateAgentToken(id: string): Promise<void>;
+
+  getTimeEntry(id: string): Promise<TimeEntry | undefined>;
+  getActiveTimeEntry(memberId: string): Promise<TimeEntry | undefined>;
+  getTimeEntriesByMember(memberId: string, startDate?: Date, endDate?: Date): Promise<TimeEntry[]>;
+  getAllTimeEntries(startDate?: Date, endDate?: Date): Promise<TimeEntryWithMember[]>;
+  createTimeEntry(entry: InsertTimeEntry): Promise<TimeEntry>;
+  updateTimeEntry(id: string, updates: Partial<InsertTimeEntry>): Promise<TimeEntry | undefined>;
+  stopTimeEntry(id: string): Promise<TimeEntry | undefined>;
+  deleteTimeEntry(id: string): Promise<boolean>;
+  getMemberTimeStats(memberId: string, startDate?: Date, endDate?: Date): Promise<{
+    totalSeconds: number;
+    totalIdleSeconds: number;
+    entriesCount: number;
+  }>;
 
   getMemberStats(memberId: string): Promise<{
     totalScreenshots: number;
@@ -380,6 +398,128 @@ export class DatabaseStorage implements IStorage {
       .update(agentTokens)
       .set({ isActive: false })
       .where(eq(agentTokens.id, id));
+  }
+
+  async getTimeEntry(id: string): Promise<TimeEntry | undefined> {
+    const [entry] = await db.select().from(timeEntries).where(eq(timeEntries.id, id));
+    return entry || undefined;
+  }
+
+  async getActiveTimeEntry(memberId: string): Promise<TimeEntry | undefined> {
+    const [entry] = await db
+      .select()
+      .from(timeEntries)
+      .where(and(eq(timeEntries.teamMemberId, memberId), eq(timeEntries.isActive, true)));
+    return entry || undefined;
+  }
+
+  async getTimeEntriesByMember(memberId: string, startDate?: Date, endDate?: Date): Promise<TimeEntry[]> {
+    let conditions = [eq(timeEntries.teamMemberId, memberId)];
+    
+    if (startDate) {
+      conditions.push(gte(timeEntries.startTime, startDate));
+    }
+    if (endDate) {
+      conditions.push(sql`${timeEntries.startTime} <= ${endDate}`);
+    }
+
+    return db
+      .select()
+      .from(timeEntries)
+      .where(and(...conditions))
+      .orderBy(desc(timeEntries.startTime));
+  }
+
+  async getAllTimeEntries(startDate?: Date, endDate?: Date): Promise<TimeEntryWithMember[]> {
+    let conditions: any[] = [];
+    
+    if (startDate) {
+      conditions.push(gte(timeEntries.startTime, startDate));
+    }
+    if (endDate) {
+      conditions.push(sql`${timeEntries.startTime} <= ${endDate}`);
+    }
+
+    const entries = conditions.length > 0
+      ? await db.select().from(timeEntries).where(and(...conditions)).orderBy(desc(timeEntries.startTime))
+      : await db.select().from(timeEntries).orderBy(desc(timeEntries.startTime));
+
+    const result: TimeEntryWithMember[] = [];
+    for (const entry of entries) {
+      const member = await this.getTeamMember(entry.teamMemberId);
+      if (member) {
+        result.push({ ...entry, teamMember: member });
+      }
+    }
+    return result;
+  }
+
+  async createTimeEntry(entry: InsertTimeEntry): Promise<TimeEntry> {
+    const [created] = await db.insert(timeEntries).values(entry).returning();
+    return created;
+  }
+
+  async updateTimeEntry(id: string, updates: Partial<InsertTimeEntry>): Promise<TimeEntry | undefined> {
+    const [updated] = await db
+      .update(timeEntries)
+      .set(updates)
+      .where(eq(timeEntries.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async stopTimeEntry(id: string): Promise<TimeEntry | undefined> {
+    const entry = await this.getTimeEntry(id);
+    if (!entry) return undefined;
+
+    const endTime = new Date();
+    const duration = Math.floor((endTime.getTime() - entry.startTime.getTime()) / 1000);
+
+    const [updated] = await db
+      .update(timeEntries)
+      .set({
+        endTime,
+        duration,
+        isActive: false,
+      })
+      .where(eq(timeEntries.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async deleteTimeEntry(id: string): Promise<boolean> {
+    await db.delete(timeEntries).where(eq(timeEntries.id, id));
+    return true;
+  }
+
+  async getMemberTimeStats(memberId: string, startDate?: Date, endDate?: Date): Promise<{
+    totalSeconds: number;
+    totalIdleSeconds: number;
+    entriesCount: number;
+  }> {
+    let conditions = [eq(timeEntries.teamMemberId, memberId), eq(timeEntries.isActive, false)];
+    
+    if (startDate) {
+      conditions.push(gte(timeEntries.startTime, startDate));
+    }
+    if (endDate) {
+      conditions.push(sql`${timeEntries.startTime} <= ${endDate}`);
+    }
+
+    const result = await db
+      .select({
+        totalSeconds: sql<number>`coalesce(sum(${timeEntries.duration}), 0)`,
+        totalIdleSeconds: sql<number>`coalesce(sum(${timeEntries.idleSeconds}), 0)`,
+        count: sql<number>`count(*)`,
+      })
+      .from(timeEntries)
+      .where(and(...conditions));
+
+    return {
+      totalSeconds: Number(result[0]?.totalSeconds ?? 0),
+      totalIdleSeconds: Number(result[0]?.totalIdleSeconds ?? 0),
+      entriesCount: Number(result[0]?.count ?? 0),
+    };
   }
 }
 
