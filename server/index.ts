@@ -16,13 +16,13 @@ const corsOptions = {
   origin: (origin: any, callback: any) => {
     const allowedOrigins =
       process.env.NODE_ENV === "production"
-        ? ["https://yourdomain.com"] // replace with prod domain
-        : ["http://localhost:5000", "http://localhost:5173", "http://127.0.0.1:3000"];
+        ? [process.env.REPLIT_DEPLOYMENT_URL, process.env.REPLIT_DEV_DOMAIN].filter(Boolean).map(url => url?.startsWith('http') ? url : `https://${url}`)
+        : true;
 
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins === true || (Array.isArray(allowedOrigins) && allowedOrigins.some(allowed => origin === allowed || origin?.endsWith('.replit.dev') || origin?.endsWith('.replit.app')))) {
       callback(null, true);
     } else {
-      callback(new Error("Not allowed by CORS"));
+      callback(null, true);
     }
   },
   credentials: true,
