@@ -11,6 +11,7 @@ import {
   insertCompanySchema,
   companies,
   teamMembers,
+  users,
 } from "@shared/schema";
 import { db } from "./db";
 import { z } from "zod";
@@ -708,11 +709,15 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  app.get("/api/screenshots/:id", apiRateLimiter, async (req, res) => {
+  app.get("/api/screenshots/:id", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
       const screenshot = await storage.getScreenshot(req.params.id);
       if (!screenshot) {
         return res.status(404).json({ error: "Screenshot not found" });
+      }
+      const access = await canAccessTeamMember(req.user!.id, screenshot.teamMemberId);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
       }
       res.json(screenshot);
     } catch (error) {
@@ -739,8 +744,16 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  app.delete("/api/screenshots/:id", async (req, res) => {
+  app.delete("/api/screenshots/:id", authenticateToken, requireAdminOrManager, async (req, res) => {
     try {
+      const screenshot = await storage.getScreenshot(req.params.id);
+      if (!screenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+      const access = await canAccessTeamMember(req.user!.id, screenshot.teamMemberId);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       await storage.deleteScreenshot(req.params.id);
       res.status(204).send();
     } catch (error) {
@@ -752,8 +765,16 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     isBlurred: z.boolean(),
   });
 
-  app.patch("/api/screenshots/:id/blur", async (req, res) => {
+  app.patch("/api/screenshots/:id/blur", authenticateToken, requireAdminOrManager, async (req, res) => {
     try {
+      const existingScreenshot = await storage.getScreenshot(req.params.id);
+      if (!existingScreenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+      const access = await canAccessTeamMember(req.user!.id, existingScreenshot.teamMemberId);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const data = blurScreenshotSchema.parse(req.body);
       const screenshot = await storage.updateScreenshotBlur(req.params.id, data.isBlurred);
       if (!screenshot) {
