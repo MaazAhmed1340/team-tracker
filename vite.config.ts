@@ -11,10 +11,10 @@ export default defineConfig({
     process.env.REPL_ID !== undefined
       ? [
           await import("@replit/vite-plugin-cartographer").then((m) =>
-            m.cartographer(),
+            m.cartographer()
           ),
           await import("@replit/vite-plugin-dev-banner").then((m) =>
-            m.devBanner(),
+            m.devBanner()
           ),
         ]
       : []),
@@ -36,5 +36,7 @@ export default defineConfig({
       strict: true,
       deny: ["**/.*"],
     },
+    // SPA fallback in Vite dev server is handled automatically for /index.html
+    // No historyApiFallback option
   },
 });

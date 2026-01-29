@@ -1,12 +1,52 @@
-import type { Express } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { insertTeamMemberSchema, insertScreenshotSchema, insertActivityLogSchema, insertTimeEntrySchema } from "@shared/schema";
+import {
+  insertTeamMemberSchema,
+  insertScreenshotSchema,
+  insertActivityLogSchema,
+  insertTimeEntrySchema,
+  insertUserSchema,
+  insertCompanySchema,
+  companies,
+  teamMembers,
+} from "@shared/schema";
+import { db } from "./db";
 import { z } from "zod";
 import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import bcrypt from "bcrypt";
+import { eq } from "drizzle-orm";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+  authenticateToken,
+} from "./middleware/auth";
+import {
+  requireAdmin,
+  requireAdminOrManager,
+  canViewReports,
+} from "./middleware/permissions";
+import {
+  loginRateLimiter,
+  apiRateLimiter,
+  screenshotRateLimiter,
+  heartbeatRateLimiter,
+} from "./middleware/rate-limit";
+import { sanitizeInput } from "./middleware/validation";
+import {
+  validateEmail,
+  validateStringLength,
+  validateDateRange,
+  validateBase64Image,
+  validateTimeFormat,
+  validateTimezone,
+  validateUUID,
+  validateNumericRange,
+} from "./utils/validation";
 
 function generateToken(): string {
   return randomBytes(32).toString("hex");
@@ -33,7 +73,372 @@ export async function registerRoutes(
     });
   }
 
-  app.get("/api/dashboard/stats", async (_req, res) => {
+  // Authentication routes
+  const loginSchema = z.object({
+    email: z.string()
+      .min(1, "Email is required")
+      .max(255, "Email must be 255 characters or less")
+      .email("Email must be a valid email address (e.g., user@example.com)")
+      .transform((val) => val.trim().toLowerCase()),
+    password: z.string()
+      .min(1, "Password is required")
+      .max(128, "Password must be 128 characters or less"),
+  });
+
+  // Combined company + first admin registration
+  const companyRegisterSchema = z.object({
+    companyName: z.string().min(1, "Company name is required"),
+    companyEmail: z.string()
+      .min(1, "Company email is required")
+      .email("Company email must be valid"),
+    companyWebsite: z.string().url().optional(),
+    adminEmail: z.string()
+      .min(1, "Admin email is required")
+      .email("Admin email must be valid"),
+    adminPassword: z.string()
+      .min(8, "Password must be at least 8 characters")
+      .max(128, "Password must be 128 characters or less"),
+  });
+
+  // Company (multi-tenant) routes
+  app.post("/api/companies", sanitizeInput, async (req: Request, res: Response) => {
+    try {
+      const data = insertCompanySchema.parse(req.body);
+
+      // Basic uniqueness check on company email
+      const existing = await storage.getCompanyByEmail(data.email);
+      if (existing) {
+        return res.status(400).json({ error: "Company with this email already exists" });
+      }
+
+      const company = await storage.createCompany(data);
+
+      res.status(201).json(company);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create company" });
+    }
+  });
+
+  // Public endpoint: create a company + first admin user in one step
+  app.post("/api/auth/company-register", sanitizeInput, async (req: Request, res: Response) => {
+    try {
+      const data = companyRegisterSchema.parse(req.body);
+
+      // Ensure company email is unique
+      const existingCompany = await storage.getCompanyByEmail(data.companyEmail);
+      if (existingCompany) {
+        return res.status(400).json({ error: "A company with this email already exists" });
+      }
+
+      // Ensure admin email is unique
+      const existingUser = await storage.getUserByEmail(data.adminEmail);
+      if (existingUser) {
+        return res.status(400).json({ error: "A user with this email already exists" });
+      }
+
+      // Create company
+      const company = await storage.createCompany({
+        name: data.companyName,
+        email: data.companyEmail,
+        website: data.companyWebsite ?? null,
+        logoUrl: null,
+        stripeCustomerId: null,
+      });
+
+      // Create admin user for that company
+      const passwordHash = await bcrypt.hash(data.adminPassword, 10);
+      const user = await storage.createUser({
+        email: data.adminEmail,
+        password: passwordHash,
+        role: "admin",
+        companyId: company.id,
+      });
+
+      // Create team member row linked to the admin user
+      const [createdTeamMember] = await db.insert(teamMembers).values({
+        userId: user.id,
+        name: data.adminEmail.split("@")[0],
+        email: data.adminEmail,
+        role: "admin",
+      }).returning();
+
+      const tokenPayload = {
+        id: user.id,
+        email: user.email,
+        role: user.role!,
+        companyId: user.companyId,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      await storage.updateUserRefreshToken(user.id, refreshToken);
+
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      });
+
+      res.status(201).json({
+        accessToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          companyId: user.companyId,
+        },
+        teamMember: {
+          id: createdTeamMember.id,
+          name: createdTeamMember.name,
+          email: createdTeamMember.email,
+          role: createdTeamMember.role,
+        },
+        company,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to register company" });
+    }
+  });
+
+  app.post("/api/auth/login", loginRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
+    try {
+      // Enhanced validation
+      const emailValidation = validateEmail(req.body?.email);
+      if (!emailValidation.valid) {
+        return res.status(400).json({ error: emailValidation.error });
+      }
+
+      const data = loginSchema.parse(req.body);
+      
+      const user = await storage.getUserByEmail(data.email);
+      if (!user) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      if (user.isActive === false) {
+        return res.status(403).json({ error: "Your account is inactive" });
+      }
+
+      // Ensure the user has been added as an employee (team member)
+      const [member] = await db
+        .select()
+        .from(teamMembers)
+        .where(eq(teamMembers.userId, user.id))
+        .limit(1);
+
+      if (!member) {
+        return res.status(403).json({
+          error: "Your company admin has not added you as an employee yet",
+        });
+      }
+
+      const isValidPassword = await bcrypt.compare(data.password, user.password);
+
+      if (!isValidPassword) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      const tokenPayload = {
+        id: user.id,
+        email: user.email,
+        role: user.role!,
+        companyId: user.companyId,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      await storage.updateUserRefreshToken(user.id, refreshToken);
+
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      });
+
+      res.json({
+        accessToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          companyId: user.companyId,
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error});
+    }
+  });
+
+  app.post("/api/auth/register", sanitizeInput, async (req: Request, res: Response) => {
+    try {
+      // Enhanced validation
+      const emailValidation = validateEmail(req.body?.email);
+      if (!emailValidation.valid) {
+        return res.status(400).json({ error: emailValidation.error });
+      }
+
+      const passwordValidation = validateStringLength(req.body?.password || "", 8, 128, "Password");
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ error: passwordValidation.error });
+      }
+
+      const data = insertUserSchema.parse(req.body);
+      
+      const existingUser = await storage.getUserByEmail(data.email);
+      if (existingUser) {
+        return res.status(400).json({ error: "Email already registered" });
+      }
+
+      const passwordHash = await bcrypt.hash(data.password, 10);
+
+      const user = await storage.createUser({
+        email: data.email,
+        password: passwordHash,
+        role: data.role || "viewer",
+        companyId: data.companyId,
+      });
+
+      // Create a team member for the user
+      const [createdTeamMember] = await db.insert(teamMembers).values({
+        userId: user.id,
+        name: data.email.split("@")[0], // Use email prefix as default name
+        email: data.email,
+        role: "member",
+      }).returning();
+
+      const tokenPayload = {
+        id: user.id,
+        email: user.email,
+        role: user.role!,
+        companyId: user.companyId,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      await storage.updateUserRefreshToken(user.id, refreshToken);
+
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      });
+
+      res.status(201).json({
+        accessToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+        },
+        teamMember: {
+          id: createdTeamMember.id,
+          name: createdTeamMember.name,
+          email: createdTeamMember.email,
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to register" });
+    }
+  });
+
+  app.post("/api/auth/logout", authenticateToken, async (req, res) => {
+    try {
+      if (req.user) {
+        await storage.updateUserRefreshToken(req.user.id, null);
+      }
+      res.clearCookie("refreshToken");
+      res.json({ message: "Logged out successfully" });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to logout" });
+    }
+  });
+
+  app.post("/api/auth/refresh", async (req, res) => {
+    try {
+      const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
+      
+      if (!refreshToken) {
+        return res.status(401).json({ error: "Refresh token required" });
+      }
+
+      const payload = verifyRefreshToken(refreshToken);
+      
+      const user = await storage.getUser(payload.id);
+      if (!user || user.refreshToken !== refreshToken) {
+        return res.status(403).json({ error: "Invalid refresh token" });
+      }
+
+      const tokenPayload = {
+        id: user.id,
+        email: user.email,
+        role: user.role!,
+        companyId: user.companyId,
+      };
+
+      const newAccessToken = generateAccessToken(tokenPayload);
+      const newRefreshToken = generateRefreshToken(tokenPayload);
+
+      await storage.updateUserRefreshToken(user.id, newRefreshToken);
+
+      res.cookie("refreshToken", newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      });
+
+      res.json({
+        accessToken: newAccessToken,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "JsonWebTokenError") {
+        return res.status(403).json({ error: "Invalid refresh token" });
+      }
+      res.status(500).json({ error: "Failed to refresh token" });
+    }
+  });
+
+  app.get("/api/auth/me", authenticateToken, async (req, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const user = await storage.getUser(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      res.json({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        companyId: user.companyId,
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get user info" });
+    }
+  });
+
+  app.get("/api/dashboard/stats", apiRateLimiter, async (_req, res) => {
     try {
       const stats = await storage.getDashboardStats();
       res.json(stats);
@@ -51,7 +456,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/team-members", async (_req, res) => {
+  app.get("/api/team-members", apiRateLimiter, sanitizeInput, async (_req: Request, res: Response) => {
     try {
       const members = await storage.getAllTeamMembers();
       res.json(members);
@@ -60,16 +465,25 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/team-members/with-stats", async (_req, res) => {
-    try {
-      const members = await storage.getTeamMembersWithStats();
-      res.json(members);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get team members with stats" });
+app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
+  try {
+    const adminId = (req as any).user?.id; // assumes JWT or session middleware sets req.user
+    if (!adminId) {
+      return res.status(401).json({ error: "Unauthorized" });
     }
-  });
 
-  app.get("/api/team-members/:id", async (req, res) => {
+    // Fetch only members belonging to this admin
+    const members = await storage.getTeamMembersWithStats(adminId);
+
+    res.json(members);
+  } catch (error) {
+    console.error("Failed to get team members with stats:", error);
+    res.status(500).json({ error: "Failed to get team members with stats" });
+  }
+});
+
+
+  app.get("/api/team-members/:id", apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
       const member = await storage.getTeamMember(req.params.id);
       if (!member) {
@@ -81,7 +495,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/team-members/:id/stats", async (req, res) => {
+  app.get("/api/team-members/:id/stats", apiRateLimiter, async (req, res) => {
     try {
       const stats = await storage.getMemberStats(req.params.id);
       res.json(stats);
@@ -90,7 +504,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/team-members/:id/timeline", async (req, res) => {
+  app.get("/api/team-members/:id/timeline", apiRateLimiter, async (req, res) => {
     try {
       const timeline = await storage.getTimeline(req.params.id);
       res.json(timeline);
@@ -99,16 +513,78 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/team-members", async (req, res) => {
+  // Schema for creating an employee (user + team member)
+  const createEmployeeSchema = insertTeamMemberSchema
+    .extend({
+      password: z.string()
+        .min(8, "Password must be at least 8 characters")
+        .max(128, "Password must be 128 characters or less"),
+    })
+    .omit({ userId: true });
+
+  app.post("/api/team-members", authenticateToken, requireAdminOrManager, sanitizeInput, async (req: Request, res: Response) => {
     try {
-      const data = insertTeamMemberSchema.parse(req.body);
-      const existing = await storage.getTeamMemberByEmail(data.email);
-      if (existing) {
-        return res.status(400).json({ error: "Email already exists" });
+      // Enhanced validation
+      if (req.body?.email) {
+        const emailValidation = validateEmail(req.body.email);
+        if (!emailValidation.valid) {
+          return res.status(400).json({ error: emailValidation.error });
+        }
       }
-      const member = await storage.createTeamMember(data);
+
+      if (req.body?.name) {
+        const nameValidation = validateStringLength(req.body.name, 1, 255, "Name");
+        if (!nameValidation.valid) {
+          return res.status(400).json({ error: nameValidation.error });
+        }
+      }
+
+      const data = createEmployeeSchema.parse(req.body);
+
+      if (!req.user) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      // Find the admin/manager's user to inherit companyId
+      const adminUser = await storage.getUser(req.user.id);
+      if (!adminUser) {
+        return res.status(401).json({ error: "Admin user not found" });
+      }
+
+      // Ensure no existing user with that email
+      const existingUser = await storage.getUserByEmail(data.email);
+      if (existingUser) {
+        return res.status(400).json({ error: "A user with this email already exists" });
+      }
+
+      const passwordHash = await bcrypt.hash(data.password, 10);
+
+      // Create user account for the employee
+      const employeeUser = await storage.createUser({
+        email: data.email,
+        password: passwordHash,
+        role: "viewer", // auth-level role; permissions middleware enforces access
+        companyId: adminUser.companyId,
+      });
+
+      const { password, ...memberData } = data;
+
+      // Create team member linked to the user
+      const member = await storage.createTeamMember({
+        ...memberData,
+        userId: employeeUser.id,
+      });
+
       broadcast({ type: "MEMBER_ADDED", member });
-      res.status(201).json(member);
+      res.status(201).json({
+        member,
+        user: {
+          id: employeeUser.id,
+          email: employeeUser.email,
+          role: employeeUser.role,
+          companyId: employeeUser.companyId,
+        },
+      });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });
@@ -136,7 +612,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/team-members/:id", async (req, res) => {
+  app.delete("/api/team-members/:id", authenticateToken, requireAdmin, async (req, res) => {
     try {
       const success = await storage.deleteTeamMember(req.params.id);
       broadcast({ type: "MEMBER_DELETED", id: req.params.id });
@@ -146,7 +622,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/screenshots", async (req, res) => {
+  app.get("/api/screenshots", apiRateLimiter, async (req, res) => {
     try {
       const memberId = req.query.memberId as string | undefined;
       const screenshots = memberId
@@ -158,7 +634,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/screenshots/recent", async (_req, res) => {
+  app.get("/api/screenshots/recent", apiRateLimiter, async (_req, res) => {
     try {
       const screenshots = await storage.getRecentScreenshots(8);
       res.json(screenshots);
@@ -167,7 +643,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/screenshots/:id", async (req, res) => {
+  app.get("/api/screenshots/:id", apiRateLimiter, async (req, res) => {
     try {
       const screenshot = await storage.getScreenshot(req.params.id);
       if (!screenshot) {
@@ -232,9 +708,23 @@ export async function registerRoutes(
     blurScreenshots: z.boolean().optional(),
     trackApps: z.boolean().optional(),
     trackUrls: z.boolean().optional(),
-    workHoursStart: z.string().nullable().optional(),
-    workHoursEnd: z.string().nullable().optional(),
-    workHoursTimezone: z.string().optional(),
+    workHoursStart: z.string()
+      .nullable()
+      .optional()
+      .refine((val) => !val || /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(val), {
+        message: "workHoursStart must be in HH:mm format (e.g., 09:00, 17:30)"
+      }),
+    workHoursEnd: z.string()
+      .nullable()
+      .optional()
+      .refine((val) => !val || /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(val), {
+        message: "workHoursEnd must be in HH:mm format (e.g., 09:00, 17:30)"
+      }),
+    workHoursTimezone: z.string()
+      .optional()
+      .refine((val) => !val || /^[A-Z][a-z]+(\/[A-Z][a-z]+)*$/.test(val) || val === "UTC", {
+        message: "workHoursTimezone must be a valid IANA timezone (e.g., America/New_York, UTC)"
+      }),
     privacyMode: z.boolean().optional(),
   });
 
@@ -258,8 +748,54 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/team-members/:id/privacy", async (req, res) => {
+  app.patch("/api/team-members/:id/privacy", sanitizeInput, async (req: Request, res: Response) => {
     try {
+      // Validate ID format
+      const idValidation = validateUUID(req.params.id, "Team member ID");
+      if (!idValidation.valid) {
+        return res.status(400).json({ error: idValidation.error });
+      }
+
+      // Validate time fields if provided
+      if (req.body.workHoursStart) {
+        const timeValidation = validateTimeFormat(req.body.workHoursStart, "workHoursStart");
+        if (!timeValidation.valid) {
+          return res.status(400).json({ error: timeValidation.error });
+        }
+      }
+
+      if (req.body.workHoursEnd) {
+        const timeValidation = validateTimeFormat(req.body.workHoursEnd, "workHoursEnd");
+        if (!timeValidation.valid) {
+          return res.status(400).json({ error: timeValidation.error });
+        }
+      }
+
+      if (req.body.workHoursTimezone) {
+        const timezoneValidation = validateTimezone(req.body.workHoursTimezone);
+        if (!timezoneValidation.valid) {
+          return res.status(400).json({ error: timezoneValidation.error });
+        }
+      }
+
+      // Validate time range if both times are provided
+      if (req.body.workHoursStart && req.body.workHoursEnd) {
+        const timeRangeValidation = validateTimeFormat(req.body.workHoursStart, "workHoursStart");
+        const timeRangeValidation2 = validateTimeFormat(req.body.workHoursEnd, "workHoursEnd");
+        if (timeRangeValidation.valid && timeRangeValidation2.valid) {
+          const [startHour, startMin] = req.body.workHoursStart.split(":").map(Number);
+          const [endHour, endMin] = req.body.workHoursEnd.split(":").map(Number);
+          const startMinutes = startHour * 60 + startMin;
+          const endMinutes = endHour * 60 + endMin;
+          
+          if (startMinutes >= endMinutes) {
+            return res.status(400).json({ 
+              error: "workHoursStart must be before workHoursEnd" 
+            });
+          }
+        }
+      }
+
       const data = privacySettingsSchema.parse(req.body);
       const member = await storage.updateTeamMember(req.params.id, data);
       if (!member) {
@@ -419,7 +955,7 @@ export async function registerRoutes(
     activityScore: z.number().min(0).max(100).default(0),
   });
 
-  app.post("/api/agent/screenshot", async (req, res) => {
+  app.post("/api/agent/screenshot", screenshotRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader?.startsWith("Bearer ")) {
@@ -435,6 +971,12 @@ export async function registerRoutes(
 
       const data = agentScreenshotSchema.parse(req.body);
 
+      // Validate base64 image
+      const imageValidation = validateBase64Image(data.imageData);
+      if (!imageValidation.valid) {
+        return res.status(400).json({ error: imageValidation.error });
+      }
+
       const uploadsDir = path.join(process.cwd(), "uploads", "screenshots");
       if (!fs.existsSync(uploadsDir)) {
         fs.mkdirSync(uploadsDir, { recursive: true });
@@ -444,6 +986,14 @@ export async function registerRoutes(
       const filePath = path.join(uploadsDir, fileName);
       
       const base64Data = data.imageData.replace(/^data:image\/\w+;base64,/, "");
+      
+      // Validate file size
+      const sizeInBytes = (base64Data.length * 3) / 4;
+      const sizeValidation = validateNumericRange(sizeInBytes, 0, 5 * 1024 * 1024, "File size");
+      if (!sizeValidation.valid) {
+        return res.status(400).json({ error: sizeValidation.error });
+      }
+      
       fs.writeFileSync(filePath, base64Data, "base64");
 
       const imageUrl = `/uploads/screenshots/${fileName}`;
@@ -479,7 +1029,7 @@ export async function registerRoutes(
     keystrokes: z.number().int().min(0).optional(),
   });
 
-  app.post("/api/agent/heartbeat", async (req, res) => {
+  app.post("/api/agent/heartbeat", heartbeatRateLimiter, async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader?.startsWith("Bearer ")) {
@@ -604,7 +1154,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/settings", async (_req, res) => {
+  app.get("/api/settings", authenticateToken, requireAdmin, async (_req, res) => {
     try {
       const settings = await storage.getSettings();
       res.json(settings);
@@ -614,17 +1164,25 @@ export async function registerRoutes(
   });
 
   const settingsSchema = z.object({
-    screenshotInterval: z.number().min(1).max(60).optional(),
+    screenshotInterval: z.number()
+      .int("screenshotInterval must be an integer")
+      .min(1, "screenshotInterval must be at least 1 second")
+      .max(60, "screenshotInterval must be 60 seconds or less")
+      .optional(),
     enableActivityTracking: z.boolean().optional(),
     enableMouseTracking: z.boolean().optional(),
     enableKeyboardTracking: z.boolean().optional(),
     enableNotifications: z.boolean().optional(),
-    idleThreshold: z.number().min(1).max(30).optional(),
+    idleThreshold: z.number()
+      .int("idleThreshold must be an integer")
+      .min(1, "idleThreshold must be at least 1 minute")
+      .max(30, "idleThreshold must be 30 minutes or less")
+      .optional(),
     blurSensitiveContent: z.boolean().optional(),
     autoStartMonitoring: z.boolean().optional(),
   });
 
-  app.put("/api/settings", async (req, res) => {
+  app.put("/api/settings", authenticateToken, requireAdmin, sanitizeInput, async (req: Request, res: Response) => {
     try {
       const data = settingsSchema.parse(req.body);
       const settings = await storage.updateSettings(data);
@@ -804,48 +1362,65 @@ export async function registerRoutes(
     notes: z.string().optional(),
   });
 
-  app.post("/api/agent/timer/start", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
+// Agent authentication middleware
+async function agentAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing authorization token" });
+  }
 
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
+  const token = authHeader.slice(7);
+  const agentToken = await storage.getAgentTokenByToken(token);
 
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
+  if (!agentToken) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
 
-      const data = agentTimerStartSchema.parse(req.body);
+  // Attach the agent token to the request for easy access in handlers
+  (req as any).agent = agentToken;
+  next();
+}
 
-      const existingActive = await storage.getActiveTimeEntry(agentToken.teamMember.id);
-      if (existingActive) {
-        return res.status(400).json({ error: "Timer already running", activeEntry: existingActive });
-      }
+// Timer start endpoint
+app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response) => {
+  try {
+    const agentToken = (req as any).agent;
+    const data = agentTimerStartSchema.parse(req.body);
 
-      const entry = await storage.createTimeEntry({
-        teamMemberId: agentToken.teamMember.id,
-        startTime: new Date(),
-        project: data.project || null,
-        notes: data.notes || null,
-        isActive: true,
-        idleSeconds: 0,
+    // Check if a timer is already running
+    const existingActive = await storage.getActiveTimeEntry(agentToken.teamMember.id);
+    if (existingActive) {
+      return res.status(400).json({
+        error: "Timer already running",
+        activeEntry: existingActive,
       });
-
-      await storage.updateTeamMember(agentToken.teamMember.id, { status: "online" });
-      await storage.updateAgentTokenLastSeen(agentToken.id);
-
-      broadcast({ type: "TIMER_STARTED", entry });
-      res.status(201).json(entry);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to start timer" });
     }
-  });
+
+    // Create new time entry
+    const entry = await storage.createTimeEntry({
+      teamMemberId: agentToken.teamMember.id,
+      startTime: new Date(),
+      project: data.project || null,
+      notes: data.notes || null,
+      isActive: true,
+      idleSeconds: 0,
+    });
+
+    // Update team member status and last seen for the agent
+    await storage.updateTeamMember(agentToken.teamMember.id, { status: "online" });
+    await storage.updateAgentTokenLastSeen(agentToken.id);
+
+    // Broadcast to any listeners (WebSocket or similar)
+    broadcast({ type: "TIMER_STARTED", entry });
+
+    res.status(201).json(entry);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: error.errors });
+    }
+    res.status(500).json({ error: "Failed to start timer" });
+  }
+});
 
   app.post("/api/agent/timer/stop", async (req, res) => {
     try {
@@ -1027,19 +1602,24 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/reports", async (req, res) => {
+  app.get("/api/reports", authenticateToken, apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
       const { startDate, endDate } = req.query;
       
       if (!startDate || !endDate) {
-        return res.status(400).json({ error: "startDate and endDate are required" });
+        return res.status(400).json({ 
+          error: "startDate and endDate are required",
+          expectedFormat: "YYYY-MM-DD or ISO 8601 format (e.g., 2024-01-15 or 2024-01-15T00:00:00Z)"
+        });
       }
 
       const start = new Date(startDate as string);
       const end = new Date(endDate as string);
 
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return res.status(400).json({ error: "Invalid date format" });
+      // Enhanced date validation
+      const dateValidation = validateDateRange(start, end, { start: "startDate", end: "endDate" });
+      if (!dateValidation.valid) {
+        return res.status(400).json({ error: dateValidation.error });
       }
 
       const members = await storage.getAllTeamMembers();

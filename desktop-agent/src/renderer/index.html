@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -76,7 +77,8 @@
       margin-bottom: 6px;
     }
 
-    input, select {
+    input,
+    select {
       width: 100%;
       padding: 12px 14px;
       border: 1px solid #3a3a4a;
@@ -88,7 +90,8 @@
       transition: border-color 0.2s;
     }
 
-    input:focus, select:focus {
+    input:focus,
+    select:focus {
       border-color: #667eea;
     }
 
@@ -167,8 +170,15 @@
     }
 
     @keyframes pulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.05); }
+
+      0%,
+      100% {
+        transform: scale(1);
+      }
+
+      50% {
+        transform: scale(1.05);
+      }
     }
 
     .status-text {
@@ -352,7 +362,7 @@
     }
 
     .project-input {
-      background: rgba(0,0,0,0.2);
+      background: rgba(0, 0, 0, 0.2);
       border: 1px solid #3a3a4a;
       border-radius: 6px;
       padding: 8px 12px;
@@ -367,6 +377,7 @@
     }
   </style>
 </head>
+
 <body>
   <div class="container">
     <div class="header">
@@ -377,10 +388,10 @@
 
     <div id="login-page" class="page active">
       <div class="error-message" id="login-error"></div>
-      
+
       <div class="form-group">
         <label for="server-url">Server URL</label>
-        <input type="url" id="server-url" placeholder="https://your-server.com" value="http://localhost:5000">
+        <input type="url" id="server-url" placeholder="https://your-server.com" value="http://127.0.0.1:5000">
       </div>
 
       <div class="form-group">
@@ -470,16 +481,19 @@
   </div>
 
   <script>
+    console.log('[RENDERER] Script loaded and initialized');
+    console.log('[RENDERER] Electron API available:', typeof window.electronAPI !== 'undefined');
+    
     const loginPage = document.getElementById('login-page');
     const dashboardPage = document.getElementById('dashboard-page');
     const loginError = document.getElementById('login-error');
-    
+
     const serverUrlInput = document.getElementById('server-url');
     const teamMemberIdInput = document.getElementById('team-member-id');
     const deviceNameInput = document.getElementById('device-name');
     const platformSelect = document.getElementById('platform');
     const loginBtn = document.getElementById('login-btn');
-    
+
     const userInitials = document.getElementById('user-initials');
     const userName = document.getElementById('user-name');
     const userStatus = document.getElementById('user-status');
@@ -523,7 +537,7 @@
 
     function updateTimerDisplay() {
       if (!isTimerRunning || !timerStartTime) return;
-      
+
       const now = new Date();
       const start = new Date(timerStartTime);
       const elapsed = Math.floor((now - start) / 1000);
@@ -581,7 +595,7 @@
     function showPage(page) {
       loginPage.classList.remove('active');
       dashboardPage.classList.remove('active');
-      
+
       if (page === 'login') {
         loginPage.classList.add('active');
       } else if (page === 'dashboard') {
@@ -600,7 +614,7 @@
 
     function updateMonitoringUI(monitoring) {
       isMonitoring = monitoring;
-      
+
       if (monitoring) {
         monitoringIndicator.classList.remove('inactive');
         monitoringIndicator.classList.add('active');
@@ -640,7 +654,7 @@
 
     async function init() {
       const status = await window.electronAPI.getStatus();
-      
+
       if (status.isLoggedIn) {
         updateUserUI(status.userName);
         updateMonitoringUI(status.isMonitoring);
@@ -653,6 +667,7 @@
     }
 
     loginBtn.addEventListener('click', async () => {
+      console.log('[RENDERER] Login button clicked');
       hideError();
       
       const serverUrl = serverUrlInput.value.trim();
@@ -660,7 +675,15 @@
       const deviceName = deviceNameInput.value.trim();
       const platform = platformSelect.value;
 
+      console.log('[RENDERER] Form values:', {
+        serverUrl,
+        teamMemberId: teamMemberId ? `${teamMemberId.substring(0, 8)}...` : '(empty)',
+        deviceName,
+        platform
+      });
+
       if (!serverUrl || !teamMemberId || !deviceName) {
+        console.warn('[RENDERER] Validation failed - missing fields');
         showError('Please fill in all fields');
         return;
       }
@@ -668,22 +691,42 @@
       loginBtn.disabled = true;
       loginBtn.textContent = 'Connecting...';
 
-      const result = await window.electronAPI.login({
-        serverUrl,
-        teamMemberId,
-        deviceName,
-        platform
-      });
+      console.log('[RENDERER] Calling electronAPI.login...');
+      let result;
+      try {
+        result = await window.electronAPI.login({
+          serverUrl,
+          teamMemberId,
+          deviceName,
+          platform
+        });
+        console.log('[RENDERER] Login result received:', {
+          success: result.success,
+          hasError: !!result.error,
+          errorMessage: result.error
+        });
+      } catch (error) {
+        console.error('[RENDERER] Exception during login call:', error);
+        console.error('[RENDERER] Error details:', {
+          name: error.name,
+          message: error.message,
+          stack: error.stack
+        });
+        result = { success: false, error: error.message || 'Unexpected error occurred' };
+      }
 
       loginBtn.disabled = false;
       loginBtn.textContent = 'Connect Device';
 
       if (result.success) {
+        console.log('[RENDERER] Login successful, updating UI...');
         updateUserUI(result.userName);
         updateMonitoringUI(false);
         await updateSettingsUI();
         showPage('dashboard');
+        console.log('[RENDERER] Dashboard page shown');
       } else {
+        console.error('[RENDERER] Login failed:', result.error);
         showError(result.error || 'Connection failed');
       }
     });
@@ -764,4 +807,5 @@
     init();
   </script>
 </body>
+
 </html>

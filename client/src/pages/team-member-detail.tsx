@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { format, formatDistanceToNow } from "date-fns";
-import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause, Monitor, Globe, Shield, Eye, EyeOff } from "lucide-react";
+import { ArrowLeft, Camera, Activity, Clock, Settings, Timer, Play, Pause, Monitor, Globe, Shield, Eye, EyeOff, Copy, Check } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -67,6 +67,7 @@ export default function TeamMemberDetail() {
 
   const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotWithMember | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [copied, setCopied] = useState(false);
 
   const { data: member, isLoading: memberLoading } = useQuery<TeamMember>({
     queryKey: ["/api/team-members", memberId],
@@ -354,6 +355,65 @@ export default function TeamMemberDetail() {
                       </span>
                     </div>
                     <Progress value={stats?.avgActivityScore ?? 0} />
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg font-medium">Desktop Agent Setup</CardTitle>
+              <CardDescription className="text-xs">
+                Use this ID to connect the desktop agent
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {memberLoading ? (
+                <div className="flex flex-col gap-3">
+                  <Skeleton className="h-10 w-full" />
+                  <Skeleton className="h-4 w-3/4" />
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <Label className="text-sm text-muted-foreground">Team Member ID</Label>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 px-3 py-2 bg-muted rounded-md text-sm font-mono break-all select-all">
+                        {member?.id}
+                      </code>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          if (member?.id) {
+                            navigator.clipboard.writeText(member.id);
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 2000);
+                            toast({
+                              title: "Copied!",
+                              description: "Team Member ID copied to clipboard",
+                            });
+                          }
+                        }}
+                        className="shrink-0"
+                      >
+                        {copied ? (
+                          <>
+                            <Check className="mr-2 h-4 w-4" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Enter this ID in the desktop agent when connecting to this team member's account.
+                    </p>
                   </div>
                 </>
               )}

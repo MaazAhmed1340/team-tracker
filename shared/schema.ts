@@ -1,10 +1,69 @@
 import { sql, relations } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, boolean, real } from "drizzle-orm/pg-core";
-import { createInsertSchema } from "drizzle-zod";
+import { pgTable, text, varchar, integer, timestamp, boolean, real, index, pgEnum, decimal, json, unique, foreignKey } from "drizzle-orm/pg-core";
+import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
+
+// ============ COMPANIES (Multi-tenant) ============
+export const companies = pgTable("companies", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  name: varchar("name", { length: 255 }).notNull(),
+  email: varchar("email", { length: 255 }).notNull().unique(),
+  website: varchar("website", { length: 255 }),
+  logoUrl: text("logo_url"),
+  stripeCustomerId: varchar("stripe_customer_id", { length: 255 }).unique(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// ============ USERS (Multi-tenant scoped) ============
+export const users = pgTable(
+  "users",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    companyId: text("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    email: varchar("email", { length: 255 }).notNull(),
+    password: text("password").notNull(),
+    refreshToken: text("refresh_token"),
+    firstName: varchar("first_name", { length: 255 }),
+    lastName: varchar("last_name", { length: 255 }),
+    role: varchar("role", { length: 50 }).default("member"), // admin, member
+    isActive: boolean("is_active").default(true),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [unique("email_company_unique").on(table.email, table.companyId)]
+);
+
+// ============ BILLING & SUBSCRIPTIONS ============
+export const billingSubscriptions = pgTable("billing_subscriptions", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  companyId: text("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  stripeSubscriptionId: varchar("stripe_subscription_id", { length: 255 }).unique(),
+  stripePriceId: varchar("stripe_price_id", { length: 255 }),
+  status: varchar("status", { length: 50 }).notNull(), // active, past_due, canceled, trialing
+  currentPeriodStart: timestamp("current_period_start"),
+  currentPeriodEnd: timestamp("current_period_end"),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false),
+  canceledAt: timestamp("canceled_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// ============ USAGE TRACKING (for metered billing) ============
+export const usageMetrics = pgTable("usage_metrics", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  companyId: text("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  metricType: varchar("metric_type", { length: 100 }).notNull(), // "active_users", "api_calls", etc.
+  value: decimal("value", { precision: 10, scale: 2 }).notNull(),
+  billingPeriod: varchar("billing_period", { length: 50 }).notNull(), // "2024-01"
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const userRoleEnum = pgEnum("user_role", ["admin", "manager", "viewer"]);
 
 export const teamMembers = pgTable("team_members", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
   avatar: text("avatar"),
@@ -20,7 +79,9 @@ export const teamMembers = pgTable("team_members", {
   workHoursEnd: text("work_hours_end"),
   workHoursTimezone: text("work_hours_timezone").default("UTC"),
   privacyMode: boolean("privacy_mode").notNull().default(false),
-});
+}, (table) => ({
+  userIdIdx: index("team_members_user_id_idx").on(table.userId),
+}));
 
 export const screenshots = pgTable("screenshots", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -42,7 +103,15 @@ export const activityLogs = pgTable("activity_logs", {
   recordedAt: timestamp("recorded_at").notNull().default(sql`now()`),
 });
 
-export const teamMembersRelations = relations(teamMembers, ({ many }) => ({
+export const usersRelations = relations(users, ({ one }) => ({
+  teamMember: one(teamMembers),
+}));
+
+export const teamMembersRelations = relations(teamMembers, ({ one, many }) => ({
+  user: one(users, {
+    fields: [teamMembers.userId],
+    references: [users.id],
+  }),
   screenshots: many(screenshots),
   activityLogs: many(activityLogs),
   timeEntries: many(timeEntries),
@@ -121,6 +190,8 @@ export const appUsageRelations = relations(appUsage, ({ one }) => ({
   }),
 }));
 
+export const userRoleSchema = z.enum(["admin", "manager", "viewer"]);
+
 export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({
   id: true,
   lastActiveAt: true,
@@ -195,3 +266,21 @@ export type AppUsageSummary = {
   totalDuration: number;
   sessionCount: number;
 };
+
+export const insertCompanySchema = createInsertSchema(companies).omit({ id: true, createdAt: true, updatedAt: true });
+export const selectCompanySchema = createSelectSchema(companies);
+
+export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true, updatedAt: true });
+export const selectUserSchema = createSelectSchema(users);
+
+export const insertBillingSubscriptionSchema = createInsertSchema(billingSubscriptions).omit({ id: true, createdAt: true, updatedAt: true });
+export const selectBillingSubscriptionSchema = createSelectSchema(billingSubscriptions);
+
+export type Company = typeof companies.$inferSelect;
+export type InsertCompany = z.infer<typeof insertCompanySchema>;
+
+export type User = typeof users.$inferSelect;
+export type InsertUser = z.infer<typeof insertUserSchema>;
+
+export type BillingSubscription = typeof billingSubscriptions.$inferSelect;
+export type InsertBillingSubscription = z.infer<typeof insertBillingSubscriptionSchema>;

@@ -21,12 +21,23 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { usePermissions } from "@/hooks/use-permissions"; // <-- import permissions hook
 
-const addMemberSchema = z.object({
-  name: z.string().min(2, "Name must be at least 2 characters"),
-  email: z.string().email("Please enter a valid email address"),
-  role: z.string().min(1, "Please select a role"),
-});
+const addMemberSchema = z
+  .object({
+    name: z.string().min(2, "Name must be at least 2 characters"),
+    email: z.string().email("Please enter a valid email address"),
+    role: z.string().min(1, "Please select a role"),
+    password: z
+      .string()
+      .min(8, "Password must be at least 8 characters")
+      .max(128, "Password must be 128 characters or less"),
+    confirmPassword: z.string().min(1, "Please confirm the password"),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords do not match",
+  });
 
 type AddMemberFormData = z.infer<typeof addMemberSchema>;
 
@@ -36,6 +47,10 @@ interface AddTeamMemberFormProps {
 
 export function AddTeamMemberForm({ onSuccess }: AddTeamMemberFormProps) {
   const { toast } = useToast();
+  const { canAddMembers } = usePermissions(); // <-- get permission
+
+  // Don't render the form if user can't add members
+  if (!canAddMembers) return null;
 
   const form = useForm<AddMemberFormData>({
     resolver: zodResolver(addMemberSchema),
@@ -43,12 +58,15 @@ export function AddTeamMemberForm({ onSuccess }: AddTeamMemberFormProps) {
       name: "",
       email: "",
       role: "member",
+      password: "",
+      confirmPassword: "",
     },
   });
 
   const mutation = useMutation({
     mutationFn: async (data: AddMemberFormData) => {
-      return apiRequest("POST", "/api/team-members", data);
+      const { confirmPassword, ...payload } = data;
+      return apiRequest("POST", "/api/team-members", payload);
     },
     onSuccess: () => {
       toast({
@@ -123,7 +141,7 @@ export function AddTeamMemberForm({ onSuccess }: AddTeamMemberFormProps) {
                     <SelectValue placeholder="Select a role" />
                   </SelectTrigger>
                 </FormControl>
-                <SelectContent>
+              <SelectContent>
                   <SelectItem value="member">Member</SelectItem>
                   <SelectItem value="developer">Developer</SelectItem>
                   <SelectItem value="designer">Designer</SelectItem>
@@ -131,6 +149,44 @@ export function AddTeamMemberForm({ onSuccess }: AddTeamMemberFormProps) {
                   <SelectItem value="admin">Admin</SelectItem>
                 </SelectContent>
               </Select>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="password"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Temporary Password</FormLabel>
+              <FormControl>
+                <Input
+                  type="password"
+                  placeholder="Set a password for this member"
+                  {...field}
+                  data-testid="input-member-password"
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="confirmPassword"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Confirm Password</FormLabel>
+              <FormControl>
+                <Input
+                  type="password"
+                  placeholder="Confirm password"
+                  {...field}
+                  data-testid="input-member-confirm-password"
+                />
+              </FormControl>
               <FormMessage />
             </FormItem>
           )}

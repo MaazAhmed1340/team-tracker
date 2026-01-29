@@ -2,8 +2,30 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, dialog, screen } =
 const path = require('path');
 const Store = require('electron-store');
 
+console.log('=== DESKTOP AGENT MAIN PROCESS STARTING ===');
+console.log('[MAIN] Node version:', process.version);
+console.log('[MAIN] Electron version:', process.versions.electron);
+console.log('[MAIN] Platform:', process.platform);
+console.log('[MAIN] Working directory:', process.cwd());
+
 const store = new Store();
-const API_BASE = store.get('apiUrl') || 'http://localhost:5000';
+// Use 127.0.0.1 instead of localhost to force IPv4 (avoids IPv6 ::1 connection issues)
+const API_BASE = store.get('apiUrl') || 'http://127.0.0.1:5000';
+console.log('[MAIN] Default API base:', API_BASE);
+
+// Helper function to normalize URLs - converts localhost to 127.0.0.1 to force IPv4
+function normalizeUrl(url) {
+  if (!url) return url;
+  // Replace localhost with 127.0.0.1 to avoid IPv6 connection issues
+  return url.replace(/localhost/g, '127.0.0.1');
+}
+
+// Helper function to get API base URL with normalization
+function getApiBase() {
+  const storedUrl = store.get('apiUrl');
+  const baseUrl = storedUrl || API_BASE;
+  return normalizeUrl(baseUrl);
+}
 
 let mainWindow = null;
 let tray = null;
@@ -35,6 +57,22 @@ function createWindow() {
     }
   });
 
+  // Open DevTools in development for debugging
+  if (process.env.NODE_ENV === 'development' || process.env.DEBUG === 'true') {
+    mainWindow.webContents.openDevTools();
+    console.log('[MAIN] DevTools opened for debugging');
+  }
+
+  // Allow opening DevTools with keyboard shortcut (Ctrl+Shift+I or F12)
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.control && input.shift && input.key.toLowerCase() === 'i') {
+      mainWindow.webContents.toggleDevTools();
+    }
+    if (input.key === 'F12') {
+      mainWindow.webContents.toggleDevTools();
+    }
+  });
+
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.on('close', (event) => {
@@ -49,6 +87,11 @@ function createWindow() {
     if (!token) {
       mainWindow.show();
     }
+  });
+
+  // Log when window is ready
+  mainWindow.webContents.once('did-finish-load', () => {
+    console.log('[MAIN] Renderer window loaded');
   });
 }
 
@@ -155,7 +198,7 @@ async function uploadScreenshot(imageData, activityScore) {
   if (!token) return;
 
   try {
-    const response = await fetch(`${API_BASE}/api/agent/screenshot`, {
+    const response = await fetch(`${getApiBase()}/api/agent/screenshot`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -185,7 +228,7 @@ async function sendHeartbeat() {
 
   try {
     const status = isMonitoring ? 'online' : 'idle';
-    const response = await fetch(`${API_BASE}/api/agent/heartbeat`, {
+    const response = await fetch(`${getApiBase()}/api/agent/heartbeat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -267,7 +310,7 @@ async function startTimer(project = null, notes = null) {
   if (!token) return { success: false, error: 'Not logged in' };
 
   try {
-    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/start`, {
+      const response = await fetch(`${getApiBase()}/api/agent/timer/start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -311,7 +354,7 @@ async function stopTimer() {
   if (!token) return { success: false, error: 'Not logged in' };
 
   try {
-    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/stop`, {
+    const response = await fetch(`${getApiBase()}/api/agent/timer/stop`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -347,7 +390,7 @@ async function getTimerStatus() {
   if (!token) return null;
 
   try {
-    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/status`, {
+    const response = await fetch(`${getApiBase()}/api/agent/timer/status`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
 
@@ -398,7 +441,7 @@ async function reportIdleTime(idleSeconds) {
   if (!token) return;
 
   try {
-    await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/timer/idle`, {
+    await fetch(`${getApiBase()}/api/agent/timer/idle`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -454,7 +497,7 @@ async function reportAppUsage(windowInfo) {
   if (!token || !windowInfo) return;
 
   try {
-    const response = await fetch(`${store.get('apiUrl') || API_BASE}/api/agent/app-usage`, {
+    const response = await fetch(`${getApiBase()}/api/agent/app-usage`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -522,21 +565,70 @@ function stopAppTracking() {
 }
 
 ipcMain.handle('login', async (event, { serverUrl, teamMemberId, deviceName, platform }) => {
+  console.log('=== DESKTOP AGENT LOGIN START ===');
+  console.log('[LOGIN] Received login request with:', {
+    serverUrl,
+    teamMemberId,
+    deviceName,
+    platform
+  });
+
   try {
-    store.set('apiUrl', serverUrl);
+    // Normalize localhost to 127.0.0.1 to force IPv4 (avoids IPv6 ::1 connection issues)
+    const normalizedUrl = normalizeUrl(serverUrl);
+    if (normalizedUrl !== serverUrl) {
+      console.log('[LOGIN] Normalized URL from localhost to 127.0.0.1:', normalizedUrl);
+    }
     
-    const response = await fetch(`${serverUrl}/api/agent/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ teamMemberId, deviceName, platform })
-    });
+    store.set('apiUrl', normalizedUrl);
+    
+    const requestUrl = `${normalizedUrl}/api/agent/register`;
+    const requestBody = { teamMemberId, deviceName, platform };
+    
+    console.log('[LOGIN] Making fetch request to:', requestUrl);
+    console.log('[LOGIN] Request body:', JSON.stringify(requestBody, null, 2));
+    console.log('[LOGIN] Request headers:', { 'Content-Type': 'application/json' });
+
+    let response;
+    try {
+      response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      console.log('[LOGIN] Fetch completed. Response status:', response.status);
+      console.log('[LOGIN] Response status text:', response.statusText);
+      console.log('[LOGIN] Response headers:', Object.fromEntries(response.headers.entries()));
+    } catch (fetchError) {
+      console.error('[LOGIN] Fetch error occurred:', fetchError);
+      console.error('[LOGIN] Fetch error name:', fetchError.name);
+      console.error('[LOGIN] Fetch error message:', fetchError.message);
+      console.error('[LOGIN] Fetch error stack:', fetchError.stack);
+      throw new Error(`Network error: ${fetchError.message}`);
+    }
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Registration failed');
+      console.error('[LOGIN] Response not OK. Status:', response.status);
+      let errorData;
+      try {
+        const text = await response.text();
+        console.error('[LOGIN] Error response body (text):', text);
+        errorData = JSON.parse(text);
+        console.error('[LOGIN] Error response body (parsed):', errorData);
+      } catch (parseError) {
+        console.error('[LOGIN] Failed to parse error response:', parseError);
+        throw new Error(`Registration failed with status ${response.status}`);
+      }
+      throw new Error(errorData.error || 'Registration failed');
     }
 
     const data = await response.json();
+    console.log('[LOGIN] Success! Response data:', {
+      hasToken: !!data.token,
+      hasAgentId: !!data.agentId,
+      teamMemberName: data.teamMember?.name,
+      teamMemberId: data.teamMember?.id
+    });
     
     store.set('authToken', data.token);
     store.set('agentId', data.agentId);
@@ -545,8 +637,15 @@ ipcMain.handle('login', async (event, { serverUrl, teamMemberId, deviceName, pla
 
     updateTrayMenu();
     
+    console.log('[LOGIN] Login successful for:', data.teamMember.name);
+    console.log('=== DESKTOP AGENT LOGIN SUCCESS ===');
     return { success: true, userName: data.teamMember.name };
   } catch (error) {
+    console.error('[LOGIN] Login failed with error:', error);
+    console.error('[LOGIN] Error type:', error.constructor.name);
+    console.error('[LOGIN] Error message:', error.message);
+    console.error('[LOGIN] Error stack:', error.stack);
+    console.log('=== DESKTOP AGENT LOGIN FAILED ===');
     return { success: false, error: error.message };
   }
 });
@@ -576,7 +675,7 @@ ipcMain.handle('get-settings', async () => {
   if (!token) return null;
 
   try {
-    const response = await fetch(`${API_BASE}/api/agent/settings`, {
+    const response = await fetch(`${getApiBase()}/api/agent/settings`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
     
@@ -623,15 +722,27 @@ ipcMain.handle('get-status', () => {
 });
 
 app.whenReady().then(() => {
+  console.log('=== DESKTOP AGENT STARTING ===');
+  console.log('[MAIN] App ready, creating window and tray...');
   createWindow();
   createTray();
 
   const token = store.get('authToken');
   const autoStart = store.get('settings')?.autoStartMonitoring;
   
+  console.log('[MAIN] Initial state:', {
+    hasToken: !!token,
+    autoStart: autoStart !== false
+  });
+  
   if (token && autoStart !== false) {
+    console.log('[MAIN] Auto-starting monitoring in 2 seconds...');
     setTimeout(startMonitoring, 2000);
   }
+  
+  console.log('[MAIN] Desktop agent initialized');
+  console.log('[MAIN] Press Ctrl+Shift+I (or Cmd+Option+I on Mac) to open DevTools');
+  console.log('=== DESKTOP AGENT READY ===');
 });
 
 app.on('window-all-closed', () => {

@@ -1,10 +1,14 @@
 import {
+  users,
   teamMembers,
   screenshots,
   activityLogs,
   agentTokens,
   timeEntries,
   appUsage,
+  companies,
+  type User,
+  type InsertUser,
   type TeamMember,
   type InsertTeamMember,
   type Screenshot,
@@ -22,15 +26,28 @@ import {
   type ScreenshotWithMember,
   type AgentTokenWithMember,
   type TimeEntryWithMember,
+  type Company,
+  type InsertCompany,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, sql, and, gte } from "drizzle-orm";
 
 export interface IStorage {
+  // Company / multi-tenant
+  getCompany(id: string): Promise<Company | undefined>;
+  getCompanyByEmail(email: string): Promise<Company | undefined>;
+  createCompany(company: InsertCompany): Promise<Company>;
+
+  getUser(id: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
+  createUser(user: Omit<InsertUser, "password"> & { password: string }): Promise<User>;
+  updateUserRefreshToken(userId: string, refreshToken: string | null): Promise<void>;
+  
   getTeamMember(id: string): Promise<TeamMember | undefined>;
   getTeamMemberByEmail(email: string): Promise<TeamMember | undefined>;
   getAllTeamMembers(): Promise<TeamMember[]>;
-  getTeamMembersWithStats(): Promise<TeamMemberWithStats[]>;
+  getTeamMembersWithStats(userId: string): Promise<TeamMemberWithStats[]>;
+
   createTeamMember(member: InsertTeamMember): Promise<TeamMember>;
   updateTeamMember(id: string, updates: Partial<InsertTeamMember>): Promise<TeamMember | undefined>;
   deleteTeamMember(id: string): Promise<boolean>;
@@ -119,6 +136,47 @@ const defaultSettings: AppSettings = {
 export class DatabaseStorage implements IStorage {
   private settings: AppSettings = { ...defaultSettings };
 
+  async getCompany(id: string): Promise<Company | undefined> {
+    const [company] = await db.select().from(companies).where(eq(companies.id, id));
+    return company || undefined;
+  }
+
+  async getCompanyByEmail(email: string): Promise<Company | undefined> {
+    const [company] = await db.select().from(companies).where(eq(companies.email, email));
+    return company || undefined;
+  }
+
+  async createCompany(companyData: InsertCompany): Promise<Company> {
+    const [created] = await db.insert(companies).values(companyData).returning();
+    return created;
+  }
+
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
+  }
+
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email));
+    return user || undefined;
+  }
+
+  async createUser(userData: Omit<InsertUser, "password"> & { password: string }): Promise<User> {
+    const { password, ...rest } = userData;
+    const [created] = await db.insert(users).values({
+      ...rest,
+      password,
+    }).returning();
+    return created;
+  }
+
+  async updateUserRefreshToken(userId: string, refreshToken: string | null): Promise<void> {
+    await db
+      .update(users)
+      .set({ refreshToken, updatedAt: new Date() })
+      .where(eq(users.id, userId));
+  }
+
   async getTeamMember(id: string): Promise<TeamMember | undefined> {
     const [member] = await db.select().from(teamMembers).where(eq(teamMembers.id, id));
     return member || undefined;
@@ -133,34 +191,48 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(teamMembers).orderBy(teamMembers.name);
   }
 
-  async getTeamMembersWithStats(): Promise<TeamMemberWithStats[]> {
-    const members = await this.getAllTeamMembers();
+  async getTeamMembersWithStats(userId: string): Promise<TeamMemberWithStats[]> {
+    // 1️⃣ Get the logged-in user to find their company
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    if (!user) return [];
+  
+    const companyId = user.companyId;
+  
+    // 2️⃣ Get all team members belonging to users of this company
+    const membersWithUsers = await db
+      .select({
+        teamMember: teamMembers,
+        user: users,
+      })
+      .from(teamMembers)
+      .leftJoin(users, eq(teamMembers.userId, users.id))
+      .where(eq(users.companyId, companyId));
+  
     const result: TeamMemberWithStats[] = [];
-    
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-
-    for (const member of members) {
+  
+    for (const { teamMember } of membersWithUsers) {
       const memberScreenshots = await db
         .select()
         .from(screenshots)
-        .where(eq(screenshots.teamMemberId, member.id))
+        .where(eq(screenshots.teamMemberId, teamMember.id))
         .orderBy(desc(screenshots.capturedAt))
         .limit(1);
-
+  
       const statsResult = await db
         .select({
           count: sql<number>`count(*)`,
           avgScore: sql<number>`coalesce(avg(${screenshots.activityScore}), 0)`,
         })
         .from(screenshots)
-        .where(eq(screenshots.teamMemberId, member.id));
-
-      const timeStats = await this.getMemberTimeStats(member.id, today);
-      const activeTimer = await this.getActiveTimeEntry(member.id);
-
+        .where(eq(screenshots.teamMemberId, teamMember.id));
+  
+      const timeStats = await this.getMemberTimeStats(teamMember.id, today);
+      const activeTimer = await this.getActiveTimeEntry(teamMember.id);
+  
       result.push({
-        ...member,
+        ...teamMember,
         screenshotCount: Number(statsResult[0]?.count ?? 0),
         avgActivityScore: Number(statsResult[0]?.avgScore ?? 0),
         lastScreenshot: memberScreenshots[0],
@@ -168,9 +240,10 @@ export class DatabaseStorage implements IStorage {
         hasActiveTimer: !!activeTimer,
       });
     }
-
+  
     return result;
   }
+  
 
   async createTeamMember(member: InsertTeamMember): Promise<TeamMember> {
     const [created] = await db.insert(teamMembers).values(member).returning();
