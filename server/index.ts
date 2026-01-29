@@ -7,22 +7,81 @@ import path from "path";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import jwt from "jsonwebtoken";
+import { runMigrations } from 'stripe-replit-sync';
+import { getStripeSync } from "./stripe/stripeClient";
+import { WebhookHandlers } from "./stripe/webhookHandlers";
 
 const app = express();
 const httpServer = createServer(app);
 
+// ---------------- Stripe Initialization ----------------
+async function initStripe() {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    console.warn('DATABASE_URL not set, skipping Stripe initialization');
+    return;
+  }
+
+  try {
+    console.log('Initializing Stripe schema...');
+    await runMigrations({ databaseUrl, schema: 'stripe' });
+    console.log('Stripe schema ready');
+
+    const stripeSync = await getStripeSync();
+
+    // Setup webhook if we have a domain
+    const replitDomain = process.env.REPLIT_DOMAINS?.split(',')[0];
+    if (replitDomain) {
+      console.log('Setting up managed webhook...');
+      try {
+        const webhookBaseUrl = `https://${replitDomain}`;
+        const result = await stripeSync.findOrCreateManagedWebhook(
+          `${webhookBaseUrl}/api/stripe/webhook`
+        );
+        if (result?.webhook?.url) {
+          console.log(`Webhook configured: ${result.webhook.url}`);
+        } else {
+          console.log('Webhook setup returned no URL, will be configured on first use');
+        }
+      } catch (webhookError) {
+        console.warn('Webhook setup skipped:', webhookError);
+      }
+    }
+
+    console.log('Syncing Stripe data...');
+    stripeSync.syncBackfill()
+      .then(() => console.log('Stripe data synced'))
+      .catch((err: Error) => console.error('Error syncing Stripe data:', err));
+  } catch (error) {
+    console.error('Failed to initialize Stripe:', error);
+  }
+}
+
+// Initialize Stripe on startup
+initStripe();
+
 // ---------------- CORS ----------------
 const corsOptions = {
   origin: (origin: any, callback: any) => {
-    const allowedOrigins =
-      process.env.NODE_ENV === "production"
-        ? [process.env.REPLIT_DEPLOYMENT_URL, process.env.REPLIT_DEV_DOMAIN].filter(Boolean).map(url => url?.startsWith('http') ? url : `https://${url}`)
-        : true;
+    if (process.env.NODE_ENV !== "production") {
+      callback(null, true);
+      return;
+    }
 
-    if (!origin || allowedOrigins === true || (Array.isArray(allowedOrigins) && allowedOrigins.some(allowed => origin === allowed || origin?.endsWith('.replit.dev') || origin?.endsWith('.replit.app')))) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    const isAllowed = origin.endsWith('.replit.dev') || 
+                      origin.endsWith('.replit.app') ||
+                      origin === process.env.REPLIT_DEPLOYMENT_URL ||
+                      origin === `https://${process.env.REPLIT_DEV_DOMAIN}`;
+
+    if (isAllowed) {
       callback(null, true);
     } else {
-      callback(null, true);
+      callback(new Error("Not allowed by CORS"));
     }
   },
   credentials: true,
@@ -31,6 +90,27 @@ const corsOptions = {
   maxAge: 86400, // 24 hours
 };
 app.use(cors(corsOptions));
+
+// ---------------- Stripe Webhook (BEFORE express.json) ----------------
+app.post(
+  '/api/stripe/webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const signature = req.headers['stripe-signature'];
+    if (!signature) {
+      return res.status(400).json({ error: 'Missing stripe-signature' });
+    }
+
+    try {
+      const sig = Array.isArray(signature) ? signature[0] : signature;
+      await WebhookHandlers.processWebhook(req.body as Buffer, sig);
+      res.status(200).json({ received: true });
+    } catch (error: any) {
+      console.error('Webhook error:', error.message);
+      res.status(400).json({ error: 'Webhook processing error' });
+    }
+  }
+);
 
 // ---------------- Middlewares ----------------
 app.use(

@@ -37,6 +37,8 @@ export interface IStorage {
   getCompany(id: string): Promise<Company | undefined>;
   getCompanyByEmail(email: string): Promise<Company | undefined>;
   createCompany(company: InsertCompany): Promise<Company>;
+  updateCompanyStripeCustomerId(companyId: string, stripeCustomerId: string): Promise<void>;
+  getUsersByCompany(companyId: string): Promise<User[]>;
 
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -149,6 +151,17 @@ export class DatabaseStorage implements IStorage {
   async createCompany(companyData: InsertCompany): Promise<Company> {
     const [created] = await db.insert(companies).values(companyData).returning();
     return created;
+  }
+
+  async updateCompanyStripeCustomerId(companyId: string, stripeCustomerId: string): Promise<void> {
+    await db
+      .update(companies)
+      .set({ stripeCustomerId, updatedAt: new Date() })
+      .where(eq(companies.id, companyId));
+  }
+
+  async getUsersByCompany(companyId: string): Promise<User[]> {
+    return db.select().from(users).where(eq(users.companyId, companyId));
   }
 
   async getUser(id: string): Promise<User | undefined> {
@@ -286,6 +299,36 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async getScreenshotsByCompany(companyId: string): Promise<ScreenshotWithMember[]> {
+    const companyUsers = await db.select().from(users).where(eq(users.companyId, companyId));
+    const companyUserIds = companyUsers.map(u => u.id);
+    
+    if (companyUserIds.length === 0) return [];
+
+    const companyMembers = await db
+      .select()
+      .from(teamMembers)
+      .where(sql`${teamMembers.userId} IN (${sql.join(companyUserIds.map(id => sql`${id}`), sql`, `)})`);
+    
+    const memberIds = companyMembers.map(m => m.id);
+    if (memberIds.length === 0) return [];
+
+    const companyScreenshots = await db
+      .select()
+      .from(screenshots)
+      .where(and(
+        eq(screenshots.isDeleted, false),
+        sql`${screenshots.teamMemberId} IN (${sql.join(memberIds.map(id => sql`${id}`), sql`, `)})`
+      ))
+      .orderBy(desc(screenshots.capturedAt));
+
+    const memberMap = new Map(companyMembers.map(m => [m.id, m]));
+    return companyScreenshots.map(s => ({
+      ...s,
+      teamMember: memberMap.get(s.teamMemberId)!,
+    })).filter(s => s.teamMember);
+  }
+
   async getRecentScreenshots(limit = 8): Promise<ScreenshotWithMember[]> {
     const recentScreenshots = await db
       .select()
@@ -302,6 +345,11 @@ export class DatabaseStorage implements IStorage {
       }
     }
     return result;
+  }
+
+  async getRecentScreenshotsByCompany(companyId: string, limit = 8): Promise<ScreenshotWithMember[]> {
+    const all = await this.getScreenshotsByCompany(companyId);
+    return all.slice(0, limit);
   }
 
   async getScreenshotsByMember(memberId: string): Promise<ScreenshotWithMember[]> {
@@ -419,6 +467,64 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async getDashboardStatsByCompany(companyId: string): Promise<{
+    activeUsers: number;
+    totalScreenshots: number;
+    averageActivity: number;
+    totalTimeToday: number;
+  }> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const companyUsers = await db.select().from(users).where(eq(users.companyId, companyId));
+    const companyUserIds = companyUsers.map(u => u.id);
+    
+    if (companyUserIds.length === 0) {
+      return { activeUsers: 0, totalScreenshots: 0, averageActivity: 0, totalTimeToday: 0 };
+    }
+
+    const companyMembers = await db
+      .select()
+      .from(teamMembers)
+      .where(sql`${teamMembers.userId} IN (${sql.join(companyUserIds.map(id => sql`${id}`), sql`, `)})`);
+
+    const activeUsers = companyMembers.filter((m) => m.status === "online").length;
+    const memberIds = companyMembers.map(m => m.id);
+    
+    if (memberIds.length === 0) {
+      return { activeUsers: 0, totalScreenshots: 0, averageActivity: 0, totalTimeToday: 0 };
+    }
+
+    const todayScreenshots = await db
+      .select({
+        count: sql<number>`count(*)`,
+        avgScore: sql<number>`coalesce(avg(${screenshots.activityScore}), 0)`,
+      })
+      .from(screenshots)
+      .where(and(
+        gte(screenshots.capturedAt, today),
+        sql`${screenshots.teamMemberId} IN (${sql.join(memberIds.map(id => sql`${id}`), sql`, `)})`
+      ));
+
+    const todayTimeResult = await db
+      .select({
+        totalSeconds: sql<number>`coalesce(sum(${timeEntries.duration}), 0)`,
+      })
+      .from(timeEntries)
+      .where(and(
+        gte(timeEntries.startTime, today),
+        eq(timeEntries.isActive, false),
+        sql`${timeEntries.teamMemberId} IN (${sql.join(memberIds.map(id => sql`${id}`), sql`, `)})`
+      ));
+
+    return {
+      activeUsers,
+      totalScreenshots: Number(todayScreenshots[0]?.count ?? 0),
+      averageActivity: Number(todayScreenshots[0]?.avgScore ?? 0),
+      totalTimeToday: Number(todayTimeResult[0]?.totalSeconds ?? 0),
+    };
+  }
+
   async getTimeline(memberId?: string): Promise<{ hour: number; activityLevel: "high" | "medium" | "low" | "none" }[]> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -434,6 +540,58 @@ export class DatabaseStorage implements IStorage {
           .where(gte(screenshots.capturedAt, today));
 
     const todayScreenshots = await query;
+
+    const hourlyActivity: Map<number, number[]> = new Map();
+    for (let i = 0; i < 24; i++) {
+      hourlyActivity.set(i, []);
+    }
+
+    for (const screenshot of todayScreenshots) {
+      const hour = new Date(screenshot.capturedAt).getHours();
+      const scores = hourlyActivity.get(hour) || [];
+      scores.push(screenshot.activityScore);
+      hourlyActivity.set(hour, scores);
+    }
+
+    return Array.from(hourlyActivity.entries()).map(([hour, scores]) => {
+      if (scores.length === 0) {
+        return { hour, activityLevel: "none" as const };
+      }
+      const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+      if (avg >= 70) return { hour, activityLevel: "high" as const };
+      if (avg >= 40) return { hour, activityLevel: "medium" as const };
+      return { hour, activityLevel: "low" as const };
+    });
+  }
+
+  async getTimelineByCompany(companyId: string): Promise<{ hour: number; activityLevel: "high" | "medium" | "low" | "none" }[]> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const companyUsers = await db.select().from(users).where(eq(users.companyId, companyId));
+    const companyUserIds = companyUsers.map(u => u.id);
+    
+    if (companyUserIds.length === 0) {
+      return Array.from({ length: 24 }, (_, i) => ({ hour: i, activityLevel: "none" as const }));
+    }
+
+    const companyMembers = await db
+      .select()
+      .from(teamMembers)
+      .where(sql`${teamMembers.userId} IN (${sql.join(companyUserIds.map(id => sql`${id}`), sql`, `)})`);
+
+    const memberIds = companyMembers.map(m => m.id);
+    if (memberIds.length === 0) {
+      return Array.from({ length: 24 }, (_, i) => ({ hour: i, activityLevel: "none" as const }));
+    }
+
+    const todayScreenshots = await db
+      .select()
+      .from(screenshots)
+      .where(and(
+        gte(screenshots.capturedAt, today),
+        sql`${screenshots.teamMemberId} IN (${sql.join(memberIds.map(id => sql`${id}`), sql`, `)})`
+      ));
 
     const hourlyActivity: Map<number, number[]> = new Map();
     for (let i = 0; i < 24; i++) {

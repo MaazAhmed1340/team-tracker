@@ -39,4 +39,10 @@ args = "npm run dev"
 waitForPort = 5000
 
 [agent]
-integrations = ["javascript_database:1.0.0", "javascript_websocket:1.0.0"]
+integrations = ["javascript_database:1.0.0", "javascript_websocket:1.0.0", "stripe:2.0.0"]
+
+[userenv]
+
+[userenv.shared]
+JWT_SECRET = "c1bb37472148414363c9331c29c658d10aa81bbe82e04c161e05f4c126b31fcaffa457d93cf1167e9875387f9136a282ebcd73f4237328b2a7e8443ba2d3836b"
+JWT_REFRESH_SECRET = "refresh_c1bb37472148414363c9331c29c658d10aa81bbe82e04c161e05f4c126b31fcaffa457d93cf1167e9875387f9136a282ebcd73f4237328b2a7e8443ba2d3836b"

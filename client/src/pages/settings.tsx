@@ -2,7 +2,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Settings as SettingsIcon, Camera, Bell, Shield, Save } from "lucide-react";
+import { Settings as SettingsIcon, Camera, Bell, Shield, Save, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Skeleton } from "@/components/ui/skeleton";
+import { UserManagement } from "@/components/user-management";
+import { useAuth } from "@/contexts/auth-context";
 
 const settingsSchema = z.object({
   screenshotInterval: z.number().min(1).max(60),
@@ -48,6 +50,8 @@ interface AppSettings {
 
 export default function Settings() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   const { data: settings, isLoading } = useQuery<AppSettings>({
     queryKey: ["/api/settings"],
@@ -123,6 +127,12 @@ export default function Settings() {
                 <Shield className="mr-2 h-4 w-4" />
                 Privacy
               </TabsTrigger>
+              {isAdmin && (
+                <TabsTrigger value="team" data-testid="tab-team">
+                  <Users className="mr-2 h-4 w-4" />
+                  Team
+                </TabsTrigger>
+              )}
             </TabsList>
 
             <TabsContent value="screenshots">
@@ -387,6 +397,12 @@ export default function Settings() {
                 </CardContent>
               </Card>
             </TabsContent>
+
+            {isAdmin && (
+              <TabsContent value="team">
+                <UserManagement />
+              </TabsContent>
+            )}
           </Tabs>
 
           <div className="mt-6 flex justify-end">

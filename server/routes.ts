@@ -18,7 +18,7 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import bcrypt from "bcrypt";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -47,6 +47,11 @@ import {
   validateUUID,
   validateNumericRange,
 } from "./utils/validation";
+import {
+  requireTeamMemberAccess,
+  canAccessTeamMember,
+  getTeamMemberIdForUser,
+} from "./middleware/data-access";
 
 function generateToken(): string {
   return randomBytes(32).toString("hex");
@@ -438,43 +443,56 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/dashboard/stats", apiRateLimiter, async (_req, res) => {
+  app.get("/api/dashboard/stats", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
-      const stats = await storage.getDashboardStats();
+      const companyId = req.user!.companyId;
+      const stats = await storage.getDashboardStatsByCompany(companyId);
       res.json(stats);
     } catch (error) {
       res.status(500).json({ error: "Failed to get dashboard stats" });
     }
   });
 
-  app.get("/api/dashboard/timeline", async (_req, res) => {
+  app.get("/api/dashboard/timeline", authenticateToken, async (req, res) => {
     try {
-      const timeline = await storage.getTimeline();
+      const companyId = req.user!.companyId;
+      const timeline = await storage.getTimelineByCompany(companyId);
       res.json(timeline);
     } catch (error) {
       res.status(500).json({ error: "Failed to get timeline" });
     }
   });
 
-  app.get("/api/team-members", apiRateLimiter, sanitizeInput, async (_req: Request, res: Response) => {
+  app.get("/api/team-members", authenticateToken, apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
-      const members = await storage.getAllTeamMembers();
-      res.json(members);
+      const userRole = req.user!.role;
+
+      if (userRole === "admin" || userRole === "manager") {
+        const members = await storage.getTeamMembersWithStats(req.user!.id);
+        return res.json(members);
+      }
+
+      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
+      if (!myMemberId) {
+        return res.json([]);
+      }
+      const myMember = await storage.getTeamMember(myMemberId);
+      res.json(myMember ? [myMember] : []);
     } catch (error) {
       res.status(500).json({ error: "Failed to get team members" });
     }
   });
 
-app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
+app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async (req, res) => {
   try {
-    const adminId = (req as any).user?.id; // assumes JWT or session middleware sets req.user
-    if (!adminId) {
-      return res.status(401).json({ error: "Unauthorized" });
+    const userId = req.user!.id;
+    const userRole = req.user!.role;
+
+    if (userRole !== "admin" && userRole !== "manager") {
+      return res.status(403).json({ error: "Access denied" });
     }
 
-    // Fetch only members belonging to this admin
-    const members = await storage.getTeamMembersWithStats(adminId);
-
+    const members = await storage.getTeamMembersWithStats(userId);
     res.json(members);
   } catch (error) {
     console.error("Failed to get team members with stats:", error);
@@ -483,8 +501,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
 });
 
 
-  app.get("/api/team-members/:id", apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
+  app.get("/api/team-members/:id", authenticateToken, apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const member = await storage.getTeamMember(req.params.id);
       if (!member) {
         return res.status(404).json({ error: "Team member not found" });
@@ -495,8 +517,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     }
   });
 
-  app.get("/api/team-members/:id/stats", apiRateLimiter, async (req, res) => {
+  app.get("/api/team-members/:id/stats", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const stats = await storage.getMemberStats(req.params.id);
       res.json(stats);
     } catch (error) {
@@ -504,8 +530,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     }
   });
 
-  app.get("/api/team-members/:id/timeline", apiRateLimiter, async (req, res) => {
+  app.get("/api/team-members/:id/timeline", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const timeline = await storage.getTimeline(req.params.id);
       res.json(timeline);
     } catch (error) {
@@ -595,8 +625,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
 
   const updateTeamMemberSchema = insertTeamMemberSchema.partial();
 
-  app.patch("/api/team-members/:id", async (req, res) => {
+  app.patch("/api/team-members/:id", authenticateToken, requireAdminOrManager, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const data = updateTeamMemberSchema.parse(req.body);
       const member = await storage.updateTeamMember(req.params.id, data);
       if (!member) {
@@ -622,22 +656,53 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     }
   });
 
-  app.get("/api/screenshots", apiRateLimiter, async (req, res) => {
+  app.get("/api/screenshots", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
       const memberId = req.query.memberId as string | undefined;
-      const screenshots = memberId
-        ? await storage.getScreenshotsByMember(memberId)
-        : await storage.getAllScreenshots();
+      const userRole = req.user!.role;
+      const companyId = req.user!.companyId;
+
+      if (memberId) {
+        const access = await canAccessTeamMember(req.user!.id, memberId);
+        if (!access.allowed) {
+          return res.status(403).json({ error: access.reason || "Access denied" });
+        }
+        const screenshots = await storage.getScreenshotsByMember(memberId);
+        return res.json(screenshots);
+      }
+
+      if (userRole === "admin" || userRole === "manager") {
+        const screenshots = await storage.getScreenshotsByCompany(companyId);
+        return res.json(screenshots);
+      }
+
+      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
+      if (!myMemberId) {
+        return res.json([]);
+      }
+      const screenshots = await storage.getScreenshotsByMember(myMemberId);
       res.json(screenshots);
     } catch (error) {
       res.status(500).json({ error: "Failed to get screenshots" });
     }
   });
 
-  app.get("/api/screenshots/recent", apiRateLimiter, async (_req, res) => {
+  app.get("/api/screenshots/recent", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
-      const screenshots = await storage.getRecentScreenshots(8);
-      res.json(screenshots);
+      const userRole = req.user!.role;
+      const companyId = req.user!.companyId;
+
+      if (userRole === "admin" || userRole === "manager") {
+        const screenshots = await storage.getRecentScreenshotsByCompany(companyId, 8);
+        return res.json(screenshots);
+      }
+
+      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
+      if (!myMemberId) {
+        return res.json([]);
+      }
+      const screenshots = await storage.getScreenshotsByMember(myMemberId);
+      res.json(screenshots.slice(0, 8));
     } catch (error) {
       res.status(500).json({ error: "Failed to get recent screenshots" });
     }
@@ -728,8 +793,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     privacyMode: z.boolean().optional(),
   });
 
-  app.get("/api/team-members/:id/privacy", async (req, res) => {
+  app.get("/api/team-members/:id/privacy", authenticateToken, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const member = await storage.getTeamMember(req.params.id);
       if (!member) {
         return res.status(404).json({ error: "Team member not found" });
@@ -748,8 +817,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     }
   });
 
-  app.patch("/api/team-members/:id/privacy", sanitizeInput, async (req: Request, res: Response) => {
+  app.patch("/api/team-members/:id/privacy", authenticateToken, sanitizeInput, async (req: Request, res: Response) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       // Validate ID format
       const idValidation = validateUUID(req.params.id, "Team member ID");
       if (!idValidation.valid) {
@@ -1122,8 +1195,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     }
   });
 
-  app.get("/api/team-members/:id/devices", async (req, res) => {
+  app.get("/api/team-members/:id/devices", authenticateToken, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const devices = await storage.getAgentTokensByMember(req.params.id);
       res.json(devices);
     } catch (error) {
@@ -1223,8 +1300,12 @@ app.get("/api/team-members/with-stats", apiRateLimiter, async (req, res) => {
     }
   });
 
-  app.get("/api/team-members/:id/time-stats", async (req, res) => {
+  app.get("/api/team-members/:id/time-stats", authenticateToken, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
       const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
       const stats = await storage.getMemberTimeStats(req.params.id, startDate, endDate);
@@ -1574,8 +1655,12 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  app.get("/api/team-members/:id/app-usage", async (req, res) => {
+  app.get("/api/team-members/:id/app-usage", authenticateToken, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const memberId = req.params.id;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -1589,8 +1674,12 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  app.get("/api/team-members/:id/app-usage/history", async (req, res) => {
+  app.get("/api/team-members/:id/app-usage/history", authenticateToken, async (req, res) => {
     try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
       const memberId = req.params.id;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -1747,6 +1836,281 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     } catch (error) {
       console.error("Failed to generate report:", error);
       res.status(500).json({ error: "Failed to generate report" });
+    }
+  });
+
+  // ============ BILLING ROUTES (Pay-per-user) ============
+  const { stripeService } = await import("./stripe/stripeService");
+  const { getStripePublishableKey } = await import("./stripe/stripeClient");
+
+  // Get Stripe publishable key for frontend
+  app.get("/api/billing/config", async (req: Request, res: Response) => {
+    try {
+      const publishableKey = await getStripePublishableKey();
+      res.json({ publishableKey });
+    } catch (error) {
+      console.error("Failed to get Stripe config:", error);
+      res.status(500).json({ error: "Failed to get billing configuration" });
+    }
+  });
+
+  // Get company subscription status
+  app.get("/api/billing/subscription", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const company = await storage.getCompany(req.user!.companyId);
+      if (!company) {
+        return res.status(404).json({ error: "Company not found" });
+      }
+
+      // Count active employees
+      const employees = await storage.getUsersByCompany(req.user!.companyId);
+      const activeEmployeeCount = employees.filter(e => e.isActive).length;
+
+      // Get subscription from Stripe if exists
+      let subscription = null;
+      if (company.stripeCustomerId) {
+        const subscriptions = await db.execute(
+          sql`SELECT * FROM stripe.subscriptions WHERE customer = ${company.stripeCustomerId} AND status = 'active' LIMIT 1`
+        );
+        subscription = subscriptions.rows[0] || null;
+      }
+
+      res.json({
+        company: {
+          id: company.id,
+          name: company.name,
+          stripeCustomerId: company.stripeCustomerId,
+        },
+        subscription,
+        activeEmployeeCount,
+      });
+    } catch (error) {
+      console.error("Failed to get subscription:", error);
+      res.status(500).json({ error: "Failed to get subscription status" });
+    }
+  });
+
+  // List available products/prices
+  app.get("/api/billing/products", async (req: Request, res: Response) => {
+    try {
+      const rows = await stripeService.listProductsWithPrices();
+
+      const productsMap = new Map();
+      for (const row of rows as any[]) {
+        if (!productsMap.has(row.product_id)) {
+          productsMap.set(row.product_id, {
+            id: row.product_id,
+            name: row.product_name,
+            description: row.product_description,
+            active: row.product_active,
+            prices: []
+          });
+        }
+        if (row.price_id) {
+          productsMap.get(row.product_id).prices.push({
+            id: row.price_id,
+            unit_amount: row.unit_amount,
+            currency: row.currency,
+            recurring: row.recurring,
+            active: row.price_active,
+          });
+        }
+      }
+
+      res.json({ products: Array.from(productsMap.values()) });
+    } catch (error) {
+      console.error("Failed to list products:", error);
+      res.status(500).json({ error: "Failed to list products" });
+    }
+  });
+
+  // Create checkout session for subscription
+  app.post("/api/billing/checkout", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { priceId, quantity } = req.body;
+      
+      if (!priceId) {
+        return res.status(400).json({ error: "Price ID is required" });
+      }
+
+      const company = await storage.getCompany(req.user!.companyId);
+      if (!company) {
+        return res.status(404).json({ error: "Company not found" });
+      }
+
+      // Create or get Stripe customer
+      let customerId = company.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripeService.createCustomer(
+          company.email,
+          company.id,
+          company.name
+        );
+        await storage.updateCompanyStripeCustomerId(company.id, customer.id);
+        customerId = customer.id;
+      }
+
+      // Count employees for quantity
+      const employees = await storage.getUsersByCompany(req.user!.companyId);
+      const employeeCount = quantity || employees.filter(e => e.isActive).length || 1;
+
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const session = await stripeService.createCheckoutSession(
+        customerId,
+        priceId,
+        employeeCount,
+        `${baseUrl}/settings?billing=success`,
+        `${baseUrl}/settings?billing=canceled`,
+        company.id
+      );
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error("Failed to create checkout session:", error);
+      res.status(500).json({ error: "Failed to create checkout session" });
+    }
+  });
+
+  // Create customer portal session for managing subscription
+  app.post("/api/billing/portal", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const company = await storage.getCompany(req.user!.companyId);
+      if (!company || !company.stripeCustomerId) {
+        return res.status(400).json({ error: "No active subscription found" });
+      }
+
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const session = await stripeService.createCustomerPortalSession(
+        company.stripeCustomerId,
+        `${baseUrl}/settings`
+      );
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error("Failed to create portal session:", error);
+      res.status(500).json({ error: "Failed to create billing portal session" });
+    }
+  });
+
+  // Update subscription quantity when employees change
+  app.post("/api/billing/update-seats", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const company = await storage.getCompany(req.user!.companyId);
+      if (!company || !company.stripeCustomerId) {
+        return res.status(400).json({ error: "No active subscription found" });
+      }
+
+      // Get active subscription
+      const subscriptions = await db.execute(
+        sql`SELECT * FROM stripe.subscriptions WHERE customer = ${company.stripeCustomerId} AND status = 'active' LIMIT 1`
+      );
+      const subscription = subscriptions.rows[0] as any;
+
+      if (!subscription) {
+        return res.status(400).json({ error: "No active subscription found" });
+      }
+
+      // Count active employees
+      const employees = await storage.getUsersByCompany(req.user!.companyId);
+      const newQuantity = employees.filter(e => e.isActive).length;
+
+      await stripeService.updateSubscriptionQuantity(subscription.id, newQuantity);
+
+      res.json({ success: true, newQuantity });
+    } catch (error) {
+      console.error("Failed to update seats:", error);
+      res.status(500).json({ error: "Failed to update subscription seats" });
+    }
+  });
+
+  // ============ USER MANAGEMENT / PERMISSION ROUTES ============
+  
+  // Get all users in the company (admin only)
+  app.get("/api/users", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const employees = await storage.getUsersByCompany(req.user!.companyId);
+      const usersWithoutPasswords = employees.map(({ password, refreshToken, ...user }) => user);
+      res.json(usersWithoutPasswords);
+    } catch (error) {
+      console.error("Failed to get users:", error);
+      res.status(500).json({ error: "Failed to get users" });
+    }
+  });
+
+  // Update user role (admin only)
+  const updateUserRoleSchema = z.object({
+    role: z.enum(["admin", "manager", "viewer"]),
+  });
+
+  app.patch("/api/users/:userId/role", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+      const { role } = updateUserRoleSchema.parse(req.body);
+
+      // Cannot change own role
+      if (userId === req.user!.id) {
+        return res.status(400).json({ error: "Cannot change your own role" });
+      }
+
+      // Ensure user belongs to the same company
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (targetUser.companyId !== req.user!.companyId) {
+        return res.status(403).json({ error: "User belongs to a different company" });
+      }
+
+      await db.update(users).set({ role, updatedAt: new Date() }).where(eq(users.id, userId));
+
+      // Also update the team member role if exists
+      const [member] = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId));
+      if (member) {
+        await db.update(teamMembers).set({ role }).where(eq(teamMembers.userId, userId));
+      }
+
+      res.json({ success: true, userId, newRole: role });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("Failed to update user role:", error);
+      res.status(500).json({ error: "Failed to update user role" });
+    }
+  });
+
+  // Toggle user active status (admin only)
+  app.patch("/api/users/:userId/status", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+      const { isActive } = req.body;
+
+      if (typeof isActive !== "boolean") {
+        return res.status(400).json({ error: "isActive must be a boolean" });
+      }
+
+      // Cannot deactivate self
+      if (userId === req.user!.id) {
+        return res.status(400).json({ error: "Cannot deactivate your own account" });
+      }
+
+      // Ensure user belongs to the same company
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (targetUser.companyId !== req.user!.companyId) {
+        return res.status(403).json({ error: "User belongs to a different company" });
+      }
+
+      await db.update(users).set({ isActive, updatedAt: new Date() }).where(eq(users.id, userId));
+
+      res.json({ success: true, userId, isActive });
+    } catch (error) {
+      console.error("Failed to update user status:", error);
+      res.status(500).json({ error: "Failed to update user status" });
     }
   });
 
