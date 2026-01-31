@@ -7,7 +7,7 @@ import path from "path";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import jwt from "jsonwebtoken";
-import { runMigrations } from 'stripe-replit-sync';
+import { runMigrations } from "stripe-replit-sync";
 import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 
@@ -18,42 +18,41 @@ const httpServer = createServer(app);
 async function initStripe() {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    console.warn('DATABASE_URL not set, skipping Stripe initialization');
+    console.warn("DATABASE_URL not set, skipping Stripe initialization");
     return;
   }
 
   try {
-    console.log('Initializing Stripe schema...');
-    await runMigrations({ databaseUrl, schema: 'stripe' });
-    console.log('Stripe schema ready');
+    console.log("Initializing Stripe schema...");
+    await runMigrations({ databaseUrl, schema: "stripe" });
+    console.log("Stripe schema ready");
 
     const stripeSync = await getStripeSync();
 
     // Setup webhook if we have a domain
-    const replitDomain = process.env.REPLIT_DOMAINS?.split(',')[0];
+    const replitDomain = process.env.REPLIT_DOMAINS?.split(",")[0];
     if (replitDomain) {
-      console.log('Setting up managed webhook...');
+      console.log("Setting up managed webhook...");
       try {
         const webhookBaseUrl = `https://${replitDomain}`;
-        const result = await stripeSync.findOrCreateManagedWebhook(
-          `${webhookBaseUrl}/api/stripe/webhook`
-        );
+        const result = await stripeSync.findOrCreateManagedWebhook(`${webhookBaseUrl}/api/stripe/webhook`);
         if (result?.webhook?.url) {
           console.log(`Webhook configured: ${result.webhook.url}`);
         } else {
-          console.log('Webhook setup returned no URL, will be configured on first use');
+          console.log("Webhook setup returned no URL, will be configured on first use");
         }
       } catch (webhookError) {
-        console.warn('Webhook setup skipped:', webhookError);
+        console.warn("Webhook setup skipped:", webhookError);
       }
     }
 
-    console.log('Syncing Stripe data...');
-    stripeSync.syncBackfill()
-      .then(() => console.log('Stripe data synced'))
-      .catch((err: Error) => console.error('Error syncing Stripe data:', err));
+    console.log("Syncing Stripe data...");
+    stripeSync
+      .syncBackfill()
+      .then(() => console.log("Stripe data synced"))
+      .catch((err: Error) => console.error("Error syncing Stripe data:", err));
   } catch (error) {
-    console.error('Failed to initialize Stripe:', error);
+    console.error("Failed to initialize Stripe:", error);
   }
 }
 
@@ -73,10 +72,11 @@ const corsOptions = {
       return;
     }
 
-    const isAllowed = origin.endsWith('.replit.dev') || 
-                      origin.endsWith('.replit.app') ||
-                      origin === process.env.REPLIT_DEPLOYMENT_URL ||
-                      origin === `https://${process.env.REPLIT_DEV_DOMAIN}`;
+    const isAllowed =
+      origin.endsWith(".replit.dev") ||
+      origin.endsWith(".replit.app") ||
+      origin === process.env.REPLIT_DEPLOYMENT_URL ||
+      origin === `https://${process.env.REPLIT_DEV_DOMAIN}`;
 
     if (isAllowed) {
       callback(null, true);
@@ -89,28 +89,44 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
   maxAge: 86400, // 24 hours
 };
-app.use(cors(corsOptions));
+app.use(
+  cors({
+    origin: true, // adjust whitelist if needed
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  }),
+);
+
+app.get("/api/debug/token", (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(" ")[1];
+  console.log("[agent] tokenPreview=", token ? `${token.slice(0,8)}...${token.slice(-8)}` : "none");
+
+  if (!token) return res.status(401).json({ error: "no token provided" });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "");
+    return res.json({ ok: true, decoded });
+  } catch (err: any) {
+    return res.status(401).json({ error: err.message });
+  }
+});
 
 // ---------------- Stripe Webhook (BEFORE express.json) ----------------
-app.post(
-  '/api/stripe/webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    const signature = req.headers['stripe-signature'];
-    if (!signature) {
-      return res.status(400).json({ error: 'Missing stripe-signature' });
-    }
-
-    try {
-      const sig = Array.isArray(signature) ? signature[0] : signature;
-      await WebhookHandlers.processWebhook(req.body as Buffer, sig);
-      res.status(200).json({ received: true });
-    } catch (error: any) {
-      console.error('Webhook error:', error.message);
-      res.status(400).json({ error: 'Webhook processing error' });
-    }
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const signature = req.headers["stripe-signature"];
+  if (!signature) {
+    return res.status(400).json({ error: "Missing stripe-signature" });
   }
-);
+
+  try {
+    const sig = Array.isArray(signature) ? signature[0] : signature;
+    await WebhookHandlers.processWebhook(req.body as Buffer, sig);
+    res.status(200).json({ received: true });
+  } catch (error: any) {
+    console.error("Webhook error:", error.message);
+    res.status(400).json({ error: "Webhook processing error" });
+  }
+});
 
 // ---------------- Middlewares ----------------
 app.use(
@@ -119,24 +135,29 @@ app.use(
     verify: (req: any, _res, buf) => {
       req.rawBody = buf;
     },
-  })
+  }),
 );
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "10mb"  }));
 app.use(cookieParser());
 
 // JWT Middleware
 app.use((req, res, next) => {
-  const token = req.headers.authorization?.split(" ")[1];
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(" ")[1];
+
+  if (!authHeader) return next();
+
+  console.log("[auth] Authorization header present. tokenLen=", token?.length ?? 0);
 
   if (token) {
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key");
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || ""); // ensure JWT_SECRET present
       (req as any).user = decoded;
-    } catch (error) {
-      console.error("Token verification error:", error);
+    } catch (err: any) {
+      console.error("[auth] Token verification failed:", err.message);
+      (req as any).tokenVerifyError = err.message; // keep for debugging
     }
   }
-
   next();
 });
 
@@ -218,6 +239,6 @@ app.use((req, res, next) => {
     },
     () => {
       log(`Server running on port ${port}`);
-    }
+    },
   );
 })();

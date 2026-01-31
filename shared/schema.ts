@@ -163,6 +163,11 @@ export const agentTokens = pgTable("agent_tokens", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
 
+const agentTimerStartSchema = z.object({
+  project: z.string().optional(),
+  notes: z.string().optional(),
+});
+
 export const agentTokensRelations = relations(agentTokens, ({ one }) => ({
   teamMember: one(teamMembers, {
     fields: [agentTokens.teamMemberId],

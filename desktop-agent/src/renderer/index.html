@@ -1,811 +1,821 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TeamTrack Agent</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-      color: #fff;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .container {
-      padding: 24px;
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .header {
-      text-align: center;
-      margin-bottom: 24px;
-    }
-
-    .logo {
-      width: 64px;
-      height: 64px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      border-radius: 16px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin: 0 auto 12px;
-      font-size: 28px;
-    }
-
-    .header h1 {
-      font-size: 24px;
-      font-weight: 600;
-    }
-
-    .header p {
-      color: #a0a0a0;
-      font-size: 14px;
-      margin-top: 4px;
-    }
-
-    .page {
-      display: none;
-      flex: 1;
-      flex-direction: column;
-    }
-
-    .page.active {
-      display: flex;
-    }
-
-    .form-group {
-      margin-bottom: 16px;
-    }
-
-    label {
-      display: block;
-      font-size: 14px;
-      color: #a0a0a0;
-      margin-bottom: 6px;
-    }
-
-    input,
-    select {
-      width: 100%;
-      padding: 12px 14px;
-      border: 1px solid #3a3a4a;
-      border-radius: 8px;
-      background: #2a2a3a;
-      color: #fff;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-
-    input:focus,
-    select:focus {
-      border-color: #667eea;
-    }
-
-    input::placeholder {
-      color: #6a6a7a;
-    }
-
-    .btn {
-      width: 100%;
-      padding: 14px;
-      border: none;
-      border-radius: 8px;
-      font-size: 16px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: #fff;
-    }
-
-    .btn-primary:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-    }
-
-    .btn-secondary {
-      background: #3a3a4a;
-      color: #fff;
-      margin-top: 8px;
-    }
-
-    .btn-secondary:hover {
-      background: #4a4a5a;
-    }
-
-    .btn-danger {
-      background: #e74c3c;
-      color: #fff;
-    }
-
-    .btn-danger:hover {
-      background: #c0392b;
-    }
-
-    .status-card {
-      background: #2a2a3a;
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 16px;
-      text-align: center;
-    }
-
-    .status-indicator {
-      width: 80px;
-      height: 80px;
-      border-radius: 50%;
-      margin: 0 auto 16px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 36px;
-    }
-
-    .status-indicator.active {
-      background: rgba(39, 174, 96, 0.2);
-      border: 3px solid #27ae60;
-      animation: pulse 2s infinite;
-    }
-
-    .status-indicator.inactive {
-      background: rgba(231, 76, 60, 0.2);
-      border: 3px solid #e74c3c;
-    }
-
-    @keyframes pulse {
-
-      0%,
-      100% {
-        transform: scale(1);
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TeamTrack Agent</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
       }
 
-      50% {
-        transform: scale(1.05);
-      }
-    }
-
-    .status-text {
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-
-    .status-subtext {
-      color: #a0a0a0;
-      font-size: 14px;
-    }
-
-    .user-info {
-      background: #2a2a3a;
-      border-radius: 12px;
-      padding: 16px;
-      margin-bottom: 16px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .user-avatar {
-      width: 48px;
-      height: 48px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 20px;
-      font-weight: 600;
-    }
-
-    .user-details {
-      flex: 1;
-    }
-
-    .user-name {
-      font-weight: 600;
-      font-size: 16px;
-    }
-
-    .user-status {
-      color: #27ae60;
-      font-size: 13px;
-    }
-
-    .settings-section {
-      background: #2a2a3a;
-      border-radius: 12px;
-      padding: 16px;
-      margin-bottom: 16px;
-    }
-
-    .settings-title {
-      font-size: 14px;
-      color: #a0a0a0;
-      margin-bottom: 12px;
-    }
-
-    .setting-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 0;
-    }
-
-    .setting-label {
-      font-size: 14px;
-    }
-
-    .setting-value {
-      color: #667eea;
-      font-size: 14px;
-    }
-
-    .error-message {
-      color: #e74c3c;
-      font-size: 14px;
-      text-align: center;
-      margin-bottom: 16px;
-      padding: 12px;
-      background: rgba(231, 76, 60, 0.1);
-      border-radius: 8px;
-      display: none;
-    }
-
-    .error-message.visible {
-      display: block;
-    }
-
-    .spacer {
-      flex: 1;
-    }
-
-    .footer-actions {
-      margin-top: auto;
-    }
-
-    .timer-card {
-      background: linear-gradient(135deg, #2d3436 0%, #2c3e50 100%);
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 16px;
-      text-align: center;
-      border: 1px solid #3a3a4a;
-    }
-
-    .timer-display {
-      font-size: 42px;
-      font-weight: 700;
-      font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
-      margin-bottom: 8px;
-      letter-spacing: 2px;
-    }
-
-    .timer-display.running {
-      color: #2ecc71;
-    }
-
-    .timer-display.stopped {
-      color: #95a5a6;
-    }
-
-    .timer-label {
-      font-size: 12px;
-      color: #a0a0a0;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 12px;
-    }
-
-    .timer-project {
-      font-size: 14px;
-      color: #667eea;
-      margin-bottom: 16px;
-    }
-
-    .timer-buttons {
-      display: flex;
-      gap: 8px;
-    }
-
-    .timer-buttons .btn {
-      flex: 1;
-    }
-
-    .btn-success {
-      background: #2ecc71;
-      color: #fff;
-    }
-
-    .btn-success:hover {
-      background: #27ae60;
-    }
-
-    .timer-stats {
-      display: flex;
-      justify-content: space-around;
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid #3a3a4a;
-    }
-
-    .timer-stat {
-      text-align: center;
-    }
-
-    .timer-stat-value {
-      font-size: 18px;
-      font-weight: 600;
-      color: #fff;
-    }
-
-    .timer-stat-label {
-      font-size: 11px;
-      color: #a0a0a0;
-      text-transform: uppercase;
-    }
-
-    .project-input {
-      background: rgba(0, 0, 0, 0.2);
-      border: 1px solid #3a3a4a;
-      border-radius: 6px;
-      padding: 8px 12px;
-      color: #fff;
-      font-size: 13px;
-      width: 100%;
-      margin-bottom: 12px;
-    }
-
-    .project-input::placeholder {
-      color: #6a6a7a;
-    }
-  </style>
-</head>
-
-<body>
-  <div class="container">
-    <div class="header">
-      <div class="logo">TT</div>
-      <h1>TeamTrack Agent</h1>
-      <p>Remote Team Monitoring</p>
-    </div>
-
-    <div id="login-page" class="page active">
-      <div class="error-message" id="login-error"></div>
-
-      <div class="form-group">
-        <label for="server-url">Server URL</label>
-        <input type="url" id="server-url" placeholder="https://your-server.com" value="http://127.0.0.1:5000">
-      </div>
-
-      <div class="form-group">
-        <label for="team-member-id">Team Member ID</label>
-        <input type="text" id="team-member-id" placeholder="Enter your team member ID">
-      </div>
-
-      <div class="form-group">
-        <label for="device-name">Device Name</label>
-        <input type="text" id="device-name" placeholder="e.g., Work Laptop">
-      </div>
-
-      <div class="form-group">
-        <label for="platform">Platform</label>
-        <select id="platform">
-          <option value="windows">Windows</option>
-          <option value="macos">macOS</option>
-          <option value="linux">Linux</option>
-        </select>
-      </div>
-
-      <div class="spacer"></div>
-
-      <button class="btn btn-primary" id="login-btn">Connect Device</button>
-    </div>
-
-    <div id="dashboard-page" class="page">
-      <div class="user-info">
-        <div class="user-avatar" id="user-initials">JD</div>
-        <div class="user-details">
-          <div class="user-name" id="user-name">John Doe</div>
-          <div class="user-status" id="user-status">Connected</div>
-        </div>
-      </div>
-
-      <div class="timer-card">
-        <div class="timer-label">Time Tracked Today</div>
-        <div class="timer-display stopped" id="timer-display">00:00:00</div>
-        <input type="text" class="project-input" id="timer-project" placeholder="Project name (optional)">
-        <div class="timer-buttons">
-          <button class="btn btn-success" id="start-timer-btn">Start Timer</button>
-          <button class="btn btn-danger" id="stop-timer-btn" style="display: none;">Stop Timer</button>
-        </div>
-        <div class="timer-stats">
-          <div class="timer-stat">
-            <div class="timer-stat-value" id="today-hours">0h</div>
-            <div class="timer-stat-label">Today</div>
-          </div>
-          <div class="timer-stat">
-            <div class="timer-stat-value" id="idle-time">0m</div>
-            <div class="timer-stat-label">Idle</div>
-          </div>
-          <div class="timer-stat">
-            <div class="timer-stat-value" id="entries-count">0</div>
-            <div class="timer-stat-label">Entries</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="status-card">
-        <div class="status-indicator inactive" id="monitoring-indicator">
-          <span id="monitoring-icon">&#9673;</span>
-        </div>
-        <div class="status-text" id="monitoring-text">Monitoring Paused</div>
-        <div class="status-subtext" id="monitoring-subtext">Click below to start monitoring</div>
-      </div>
-
-      <button class="btn btn-primary" id="toggle-monitoring-btn">Start Monitoring</button>
-
-      <div class="settings-section" style="margin-top: 16px;">
-        <div class="settings-title">Current Settings</div>
-        <div class="setting-item">
-          <span class="setting-label">Screenshot Interval</span>
-          <span class="setting-value" id="interval-value">5 minutes</span>
-        </div>
-        <div class="setting-item">
-          <span class="setting-label">Activity Tracking</span>
-          <span class="setting-value" id="activity-value">Enabled</span>
-        </div>
-      </div>
-
-      <div class="footer-actions">
-        <button class="btn btn-secondary" id="refresh-settings-btn">Refresh Settings</button>
-        <button class="btn btn-danger" id="logout-btn" style="margin-top: 8px;">Disconnect Device</button>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    console.log('[RENDERER] Script loaded and initialized');
-    console.log('[RENDERER] Electron API available:', typeof window.electronAPI !== 'undefined');
-    
-    const loginPage = document.getElementById('login-page');
-    const dashboardPage = document.getElementById('dashboard-page');
-    const loginError = document.getElementById('login-error');
-
-    const serverUrlInput = document.getElementById('server-url');
-    const teamMemberIdInput = document.getElementById('team-member-id');
-    const deviceNameInput = document.getElementById('device-name');
-    const platformSelect = document.getElementById('platform');
-    const loginBtn = document.getElementById('login-btn');
-
-    const userInitials = document.getElementById('user-initials');
-    const userName = document.getElementById('user-name');
-    const userStatus = document.getElementById('user-status');
-    const monitoringIndicator = document.getElementById('monitoring-indicator');
-    const monitoringText = document.getElementById('monitoring-text');
-    const monitoringSubtext = document.getElementById('monitoring-subtext');
-    const toggleMonitoringBtn = document.getElementById('toggle-monitoring-btn');
-    const intervalValue = document.getElementById('interval-value');
-    const activityValue = document.getElementById('activity-value');
-    const refreshSettingsBtn = document.getElementById('refresh-settings-btn');
-    const logoutBtn = document.getElementById('logout-btn');
-
-    const timerDisplay = document.getElementById('timer-display');
-    const timerProject = document.getElementById('timer-project');
-    const startTimerBtn = document.getElementById('start-timer-btn');
-    const stopTimerBtn = document.getElementById('stop-timer-btn');
-    const todayHours = document.getElementById('today-hours');
-    const idleTime = document.getElementById('idle-time');
-    const entriesCount = document.getElementById('entries-count');
-
-    let isMonitoring = false;
-    let isTimerRunning = false;
-    let timerStartTime = null;
-    let timerInterval = null;
-
-    function formatDuration(seconds) {
-      const hours = Math.floor(seconds / 3600);
-      const minutes = Math.floor((seconds % 3600) / 60);
-      const secs = seconds % 60;
-      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    }
-
-    function formatHours(seconds) {
-      const hours = Math.floor(seconds / 3600);
-      const minutes = Math.floor((seconds % 3600) / 60);
-      if (hours > 0) {
-        return `${hours}h ${minutes}m`;
-      }
-      return `${minutes}m`;
-    }
-
-    function updateTimerDisplay() {
-      if (!isTimerRunning || !timerStartTime) return;
-
-      const now = new Date();
-      const start = new Date(timerStartTime);
-      const elapsed = Math.floor((now - start) / 1000);
-      timerDisplay.textContent = formatDuration(elapsed);
-    }
-
-    function startTimerUI(entry) {
-      isTimerRunning = true;
-      timerStartTime = entry.startTime;
-      timerDisplay.classList.remove('stopped');
-      timerDisplay.classList.add('running');
-      startTimerBtn.style.display = 'none';
-      stopTimerBtn.style.display = 'block';
-      timerProject.disabled = true;
-      if (entry.project) {
-        timerProject.value = entry.project;
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        color: #fff;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
       }
 
-      if (timerInterval) clearInterval(timerInterval);
-      timerInterval = setInterval(updateTimerDisplay, 1000);
-      updateTimerDisplay();
-    }
-
-    function stopTimerUI() {
-      isTimerRunning = false;
-      timerStartTime = null;
-      timerDisplay.textContent = '00:00:00';
-      timerDisplay.classList.remove('running');
-      timerDisplay.classList.add('stopped');
-      startTimerBtn.style.display = 'block';
-      stopTimerBtn.style.display = 'none';
-      timerProject.disabled = false;
-      timerProject.value = '';
-
-      if (timerInterval) {
-        clearInterval(timerInterval);
-        timerInterval = null;
+      .container {
+        padding: 24px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
       }
-    }
 
-    async function updateTimerStats() {
-      const timerStatus = await window.electronAPI.getTimerStatus();
-      if (timerStatus) {
-        if (timerStatus.isRunning && timerStatus.activeEntry) {
-          startTimerUI(timerStatus.activeEntry);
+      .header {
+        text-align: center;
+        margin-bottom: 24px;
+      }
+
+      .logo {
+        width: 64px;
+        height: 64px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 12px;
+        font-size: 28px;
+      }
+
+      .header h1 {
+        font-size: 24px;
+        font-weight: 600;
+      }
+
+      .header p {
+        color: #a0a0a0;
+        font-size: 14px;
+        margin-top: 4px;
+      }
+
+      .page {
+        display: none;
+        flex: 1;
+        flex-direction: column;
+      }
+
+      .page.active {
+        display: flex;
+      }
+
+      .form-group {
+        margin-bottom: 16px;
+      }
+
+      label {
+        display: block;
+        font-size: 14px;
+        color: #a0a0a0;
+        margin-bottom: 6px;
+      }
+
+      input,
+      select {
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid #3a3a4a;
+        border-radius: 8px;
+        background: #2a2a3a;
+        color: #fff;
+        font-size: 14px;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+
+      input:focus,
+      select:focus {
+        border-color: #667eea;
+      }
+
+      input::placeholder {
+        color: #6a6a7a;
+      }
+
+      .btn {
+        width: 100%;
+        padding: 14px;
+        border: none;
+        border-radius: 8px;
+        font-size: 16px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .btn-primary {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #fff;
+      }
+
+      .btn-primary:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+      }
+
+      .btn-secondary {
+        background: #3a3a4a;
+        color: #fff;
+        margin-top: 8px;
+      }
+
+      .btn-secondary:hover {
+        background: #4a4a5a;
+      }
+
+      .btn-danger {
+        background: #e74c3c;
+        color: #fff;
+      }
+
+      .btn-danger:hover {
+        background: #c0392b;
+      }
+
+      .status-card {
+        background: #2a2a3a;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 16px;
+        text-align: center;
+      }
+
+      .status-indicator {
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        margin: 0 auto 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 36px;
+      }
+
+      .status-indicator.active {
+        background: rgba(39, 174, 96, 0.2);
+        border: 3px solid #27ae60;
+        animation: pulse 2s infinite;
+      }
+
+      .status-indicator.inactive {
+        background: rgba(231, 76, 60, 0.2);
+        border: 3px solid #e74c3c;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(1);
         }
-        if (timerStatus.todayStats) {
-          todayHours.textContent = formatHours(timerStatus.todayStats.totalSeconds);
-          idleTime.textContent = formatHours(timerStatus.todayStats.totalIdleSeconds);
-          entriesCount.textContent = timerStatus.todayStats.entriesCount;
+
+        50% {
+          transform: scale(1.05);
         }
       }
-    }
 
-    function showPage(page) {
-      loginPage.classList.remove('active');
-      dashboardPage.classList.remove('active');
-
-      if (page === 'login') {
-        loginPage.classList.add('active');
-      } else if (page === 'dashboard') {
-        dashboardPage.classList.add('active');
+      .status-text {
+        font-size: 18px;
+        font-weight: 600;
+        margin-bottom: 4px;
       }
-    }
 
-    function showError(message) {
-      loginError.textContent = message;
-      loginError.classList.add('visible');
-    }
-
-    function hideError() {
-      loginError.classList.remove('visible');
-    }
-
-    function updateMonitoringUI(monitoring) {
-      isMonitoring = monitoring;
-
-      if (monitoring) {
-        monitoringIndicator.classList.remove('inactive');
-        monitoringIndicator.classList.add('active');
-        monitoringText.textContent = 'Monitoring Active';
-        monitoringSubtext.textContent = 'Screenshots are being captured';
-        toggleMonitoringBtn.textContent = 'Stop Monitoring';
-        toggleMonitoringBtn.classList.remove('btn-primary');
-        toggleMonitoringBtn.classList.add('btn-danger');
-        userStatus.textContent = 'Monitoring Active';
-        userStatus.style.color = '#27ae60';
-      } else {
-        monitoringIndicator.classList.remove('active');
-        monitoringIndicator.classList.add('inactive');
-        monitoringText.textContent = 'Monitoring Paused';
-        monitoringSubtext.textContent = 'Click below to start monitoring';
-        toggleMonitoringBtn.textContent = 'Start Monitoring';
-        toggleMonitoringBtn.classList.remove('btn-danger');
-        toggleMonitoringBtn.classList.add('btn-primary');
-        userStatus.textContent = 'Connected';
-        userStatus.style.color = '#667eea';
+      .status-subtext {
+        color: #a0a0a0;
+        font-size: 14px;
       }
-    }
 
-    function updateUserUI(name) {
-      userName.textContent = name;
-      const initials = name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
-      userInitials.textContent = initials;
-    }
-
-    async function updateSettingsUI() {
-      const settings = await window.electronAPI.getSettings();
-      if (settings) {
-        intervalValue.textContent = `${settings.screenshotInterval} minutes`;
-        activityValue.textContent = settings.enableActivityTracking ? 'Enabled' : 'Disabled';
+      .user-info {
+        background: #2a2a3a;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
       }
-    }
 
-    async function init() {
-      const status = await window.electronAPI.getStatus();
-
-      if (status.isLoggedIn) {
-        updateUserUI(status.userName);
-        updateMonitoringUI(status.isMonitoring);
-        await updateSettingsUI();
-        await updateTimerStats();
-        showPage('dashboard');
-      } else {
-        showPage('login');
+      .user-avatar {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        font-weight: 600;
       }
-    }
 
-    loginBtn.addEventListener('click', async () => {
-      console.log('[RENDERER] Login button clicked');
-      hideError();
-      
-      const serverUrl = serverUrlInput.value.trim();
-      const teamMemberId = teamMemberIdInput.value.trim();
-      const deviceName = deviceNameInput.value.trim();
-      const platform = platformSelect.value;
+      .user-details {
+        flex: 1;
+      }
 
-      console.log('[RENDERER] Form values:', {
-        serverUrl,
-        teamMemberId: teamMemberId ? `${teamMemberId.substring(0, 8)}...` : '(empty)',
-        deviceName,
-        platform
+      .user-name {
+        font-weight: 600;
+        font-size: 16px;
+      }
+
+      .user-status {
+        color: #27ae60;
+        font-size: 13px;
+      }
+
+      .settings-section {
+        background: #2a2a3a;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      .settings-title {
+        font-size: 14px;
+        color: #a0a0a0;
+        margin-bottom: 12px;
+      }
+
+      .setting-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 0;
+      }
+
+      .setting-label {
+        font-size: 14px;
+      }
+
+      .setting-value {
+        color: #667eea;
+        font-size: 14px;
+      }
+
+      .error-message {
+        color: #e74c3c;
+        font-size: 14px;
+        text-align: center;
+        margin-bottom: 16px;
+        padding: 12px;
+        background: rgba(231, 76, 60, 0.1);
+        border-radius: 8px;
+        display: none;
+      }
+
+      .error-message.visible {
+        display: block;
+      }
+
+      .spacer {
+        flex: 1;
+      }
+
+      .footer-actions {
+        margin-top: auto;
+      }
+
+      .timer-card {
+        background: linear-gradient(135deg, #2d3436 0%, #2c3e50 100%);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 16px;
+        text-align: center;
+        border: 1px solid #3a3a4a;
+      }
+
+      .timer-display {
+        font-size: 42px;
+        font-weight: 700;
+        font-family: "SF Mono", "Monaco", "Inconsolata", monospace;
+        margin-bottom: 8px;
+        letter-spacing: 2px;
+      }
+
+      .timer-display.running {
+        color: #2ecc71;
+      }
+
+      .timer-display.stopped {
+        color: #95a5a6;
+      }
+
+      .timer-label {
+        font-size: 12px;
+        color: #a0a0a0;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 12px;
+      }
+
+      .timer-project {
+        font-size: 14px;
+        color: #667eea;
+        margin-bottom: 16px;
+      }
+
+      .timer-buttons {
+        display: flex;
+        gap: 8px;
+      }
+
+      .timer-buttons .btn {
+        flex: 1;
+      }
+
+      .btn-success {
+        background: #2ecc71;
+        color: #fff;
+      }
+
+      .btn-success:hover {
+        background: #27ae60;
+      }
+
+      .timer-stats {
+        display: flex;
+        justify-content: space-around;
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid #3a3a4a;
+      }
+
+      .timer-stat {
+        text-align: center;
+      }
+
+      .timer-stat-value {
+        font-size: 18px;
+        font-weight: 600;
+        color: #fff;
+      }
+
+      .timer-stat-label {
+        font-size: 11px;
+        color: #a0a0a0;
+        text-transform: uppercase;
+      }
+
+      .project-input {
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid #3a3a4a;
+        border-radius: 6px;
+        padding: 8px 12px;
+        color: #fff;
+        font-size: 13px;
+        width: 100%;
+        margin-bottom: 12px;
+      }
+
+      .project-input::placeholder {
+        color: #6a6a7a;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="logo">TT</div>
+        <h1>TeamTrack Agent</h1>
+        <p>Remote Team Monitoring</p>
+      </div>
+
+      <div id="login-page" class="page active">
+        <div class="error-message" id="login-error"></div>
+
+        <div class="form-group">
+          <label for="server-url">Server URL</label>
+          <input type="url" id="server-url" placeholder="https://your-server.com" value="http://127.0.0.1:5000" />
+        </div>
+
+        <div class="form-group">
+          <label for="team-member-id">Team Member ID</label>
+          <input type="text" id="team-member-id" placeholder="Enter your team member ID" />
+        </div>
+
+        <div class="form-group">
+          <label for="device-name">Device Name</label>
+          <input type="text" id="device-name" placeholder="e.g., Work Laptop" />
+        </div>
+
+        <div class="form-group">
+          <label for="platform">Platform</label>
+          <select id="platform">
+            <option value="windows">Windows</option>
+            <option value="macos">macOS</option>
+            <option value="linux">Linux</option>
+          </select>
+        </div>
+
+        <div class="spacer"></div>
+
+        <button class="btn btn-primary" id="login-btn">Connect Device</button>
+      </div>
+
+      <div id="dashboard-page" class="page">
+        <div class="user-info">
+          <div class="user-avatar" id="user-initials">JD</div>
+          <div class="user-details">
+            <div class="user-name" id="user-name">John Doe</div>
+            <div class="user-status" id="user-status">Connected</div>
+          </div>
+        </div>
+
+        <div class="timer-card">
+          <div class="timer-label">Time Tracked Today</div>
+          <div class="timer-display stopped" id="timer-display">00:00:00</div>
+          <input type="text" class="project-input" id="timer-project" placeholder="Project name (optional)" />
+          <div class="timer-buttons">
+            <button class="btn btn-success" id="start-timer-btn">Start Timer</button>
+            <button class="btn btn-danger" id="stop-timer-btn" style="display: none">Stop Timer</button>
+          </div>
+          <div class="timer-stats">
+            <div class="timer-stat">
+              <div class="timer-stat-value" id="today-hours">0h</div>
+              <div class="timer-stat-label">Today</div>
+            </div>
+            <div class="timer-stat">
+              <div class="timer-stat-value" id="idle-time">0m</div>
+              <div class="timer-stat-label">Idle</div>
+            </div>
+            <div class="timer-stat">
+              <div class="timer-stat-value" id="entries-count">0</div>
+              <div class="timer-stat-label">Entries</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-indicator inactive" id="monitoring-indicator">
+            <span id="monitoring-icon">&#9673;</span>
+          </div>
+          <div class="status-text" id="monitoring-text">Monitoring Paused</div>
+          <div class="status-subtext" id="monitoring-subtext">Click below to start monitoring</div>
+        </div>
+
+        <button class="btn btn-primary" id="toggle-monitoring-btn">Start Monitoring</button>
+
+        <div class="settings-section" style="margin-top: 16px">
+          <div class="settings-title">Current Settings</div>
+          <div class="setting-item">
+            <span class="setting-label">Screenshot Interval</span>
+            <span class="setting-value" id="interval-value">5 minutes</span>
+          </div>
+          <div class="setting-item">
+            <span class="setting-label">Activity Tracking</span>
+            <span class="setting-value" id="activity-value">Enabled</span>
+          </div>
+        </div>
+
+        <div class="footer-actions">
+          <button class="btn btn-secondary" id="refresh-settings-btn">Refresh Settings</button>
+          <button class="btn btn-danger" id="logout-btn" style="margin-top: 8px">Disconnect Device</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      console.log("[RENDERER] Script loaded and initialized");
+      console.log("[RENDERER] Electron API available:", typeof window.electronAPI !== "undefined");
+
+      const loginPage = document.getElementById("login-page");
+      const dashboardPage = document.getElementById("dashboard-page");
+      const loginError = document.getElementById("login-error");
+
+      const serverUrlInput = document.getElementById("server-url");
+      const teamMemberIdInput = document.getElementById("team-member-id");
+      const deviceNameInput = document.getElementById("device-name");
+      const platformSelect = document.getElementById("platform");
+      const loginBtn = document.getElementById("login-btn");
+
+      const userInitials = document.getElementById("user-initials");
+      const userName = document.getElementById("user-name");
+      const userStatus = document.getElementById("user-status");
+      const monitoringIndicator = document.getElementById("monitoring-indicator");
+      const monitoringText = document.getElementById("monitoring-text");
+      const monitoringSubtext = document.getElementById("monitoring-subtext");
+      const toggleMonitoringBtn = document.getElementById("toggle-monitoring-btn");
+      const intervalValue = document.getElementById("interval-value");
+      const activityValue = document.getElementById("activity-value");
+      const refreshSettingsBtn = document.getElementById("refresh-settings-btn");
+      const logoutBtn = document.getElementById("logout-btn");
+
+      const timerDisplay = document.getElementById("timer-display");
+      const timerProject = document.getElementById("timer-project");
+      const startTimerBtn = document.getElementById("start-timer-btn");
+      const stopTimerBtn = document.getElementById("stop-timer-btn");
+      const todayHours = document.getElementById("today-hours");
+      const idleTime = document.getElementById("idle-time");
+      const entriesCount = document.getElementById("entries-count");
+
+      let isMonitoring = false;
+      let isTimerRunning = false;
+      let timerStartTime = null;
+      let timerInterval = null;
+
+      function formatDuration(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+      }
+
+      function formatHours(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (hours > 0) {
+          return `${hours}h ${minutes}m`;
+        }
+        return `${minutes}m`;
+      }
+
+      function updateTimerDisplay() {
+        if (!isTimerRunning || !timerStartTime) return;
+
+        const now = new Date();
+        const start = new Date(timerStartTime);
+        const elapsed = Math.floor((now - start) / 1000);
+        timerDisplay.textContent = formatDuration(elapsed);
+      }
+
+      function startTimerUI(entry) {
+        isTimerRunning = true;
+        timerStartTime = entry.startTime;
+        timerDisplay.classList.remove("stopped");
+        timerDisplay.classList.add("running");
+        startTimerBtn.style.display = "none";
+        stopTimerBtn.style.display = "block";
+        timerProject.disabled = true;
+        if (entry.project) {
+          timerProject.value = entry.project;
+        }
+
+        updateTimerDisplay();
+      }
+
+      function stopTimerUI() {
+        isTimerRunning = false;
+        timerStartTime = null;
+        timerDisplay.textContent = "00:00:00";
+        timerDisplay.classList.remove("running");
+        timerDisplay.classList.add("stopped");
+        startTimerBtn.style.display = "block";
+        stopTimerBtn.style.display = "none";
+        timerProject.disabled = false;
+        timerProject.value = "";
+
+        if (timerInterval) {
+          clearInterval(timerInterval);
+          timerInterval = null;
+        }
+      }
+
+      async function updateTimerStats() {
+        const timerStatus = await window.electronAPI.getTimerStatus();
+        if (timerStatus) {
+          if (timerStatus.isRunning && timerStatus.activeEntry) {
+            startTimerUI(timerStatus.activeEntry);
+          }
+          if (timerStatus.todayStats) {
+            todayHours.textContent = formatHours(timerStatus.todayStats.totalSeconds);
+            idleTime.textContent = formatHours(timerStatus.todayStats.totalIdleSeconds);
+            entriesCount.textContent = timerStatus.todayStats.entriesCount;
+          }
+        }
+      }
+
+      function showPage(page) {
+        loginPage.classList.remove("active");
+        dashboardPage.classList.remove("active");
+
+        if (page === "login") {
+          loginPage.classList.add("active");
+        } else if (page === "dashboard") {
+          dashboardPage.classList.add("active");
+        }
+      }
+
+      function showError(message) {
+        loginError.textContent = message;
+        loginError.classList.add("visible");
+      }
+
+      function hideError() {
+        loginError.classList.remove("visible");
+      }
+
+      function updateMonitoringUI(monitoring) {
+        isMonitoring = monitoring;
+
+        if (monitoring) {
+          monitoringIndicator.classList.remove("inactive");
+          monitoringIndicator.classList.add("active");
+          monitoringText.textContent = "Monitoring Active";
+          monitoringSubtext.textContent = "Screenshots are being captured";
+          toggleMonitoringBtn.textContent = "Stop Monitoring";
+          toggleMonitoringBtn.classList.remove("btn-primary");
+          toggleMonitoringBtn.classList.add("btn-danger");
+          userStatus.textContent = "Monitoring Active";
+          userStatus.style.color = "#27ae60";
+        } else {
+          monitoringIndicator.classList.remove("active");
+          monitoringIndicator.classList.add("inactive");
+          monitoringText.textContent = "Monitoring Paused";
+          monitoringSubtext.textContent = "Click below to start monitoring";
+          toggleMonitoringBtn.textContent = "Start Monitoring";
+          toggleMonitoringBtn.classList.remove("btn-danger");
+          toggleMonitoringBtn.classList.add("btn-primary");
+          userStatus.textContent = "Connected";
+          userStatus.style.color = "#667eea";
+        }
+      }
+
+      function updateUserUI(name) {
+        userName.textContent = name;
+        const initials = name
+          .split(" ")
+          .map((n) => n[0])
+          .join("")
+          .toUpperCase()
+          .slice(0, 2);
+        userInitials.textContent = initials;
+      }
+
+      async function updateSettingsUI() {
+        const settings = await window.electronAPI.getSettings();
+        if (settings) {
+          intervalValue.textContent = `${settings.screenshotInterval} minutes`;
+          activityValue.textContent = settings.enableActivityTracking ? "Enabled" : "Disabled";
+        }
+      }
+
+      async function init() {
+        const status = await window.electronAPI.getStatus();
+
+        if (status.isLoggedIn) {
+          updateUserUI(status.userName);
+          updateMonitoringUI(status.isMonitoring);
+          await updateSettingsUI();
+          await updateTimerStats();
+          showPage("dashboard");
+        } else {
+          showPage("login");
+        }
+      }
+
+      loginBtn.addEventListener("click", async () => {
+        console.log("[RENDERER] Login button clicked");
+        hideError();
+
+        const serverUrl = serverUrlInput.value.trim();
+        const teamMemberId = teamMemberIdInput.value.trim();
+        const deviceName = deviceNameInput.value.trim();
+        const platform = platformSelect.value;
+
+        console.log("[RENDERER] Form values:", {
+          serverUrl,
+          teamMemberId: teamMemberId ? `${teamMemberId.substring(0, 8)}...` : "(empty)",
+          deviceName,
+          platform,
+        });
+
+        if (!serverUrl || !teamMemberId || !deviceName) {
+          console.warn("[RENDERER] Validation failed - missing fields");
+          showError("Please fill in all fields");
+          return;
+        }
+
+        loginBtn.disabled = true;
+        loginBtn.textContent = "Connecting...";
+
+        console.log("[RENDERER] Calling electronAPI.login...");
+        let result;
+        try {
+          result = await window.electronAPI.login({
+            serverUrl,
+            teamMemberId,
+            deviceName,
+            platform,
+          });
+          console.log("[RENDERER] Login result received:", {
+            success: result.success,
+            hasError: !!result.error,
+            errorMessage: result.error,
+          });
+        } catch (error) {
+          console.error("[RENDERER] Exception during login call:", error);
+          console.error("[RENDERER] Error details:", {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+          });
+          result = { success: false, error: error.message || "Unexpected error occurred" };
+        }
+
+        loginBtn.disabled = false;
+        loginBtn.textContent = "Connect Device";
+
+        if (result.success) {
+          console.log("[RENDERER] Login successful, updating UI...");
+          updateUserUI(result.userName);
+          updateMonitoringUI(false);
+          await updateSettingsUI();
+          showPage("dashboard");
+          console.log("[RENDERER] Dashboard page shown");
+        } else {
+          console.error("[RENDERER] Login failed:", result.error);
+          showError(result.error || "Connection failed");
+        }
       });
 
-      if (!serverUrl || !teamMemberId || !deviceName) {
-        console.warn('[RENDERER] Validation failed - missing fields');
-        showError('Please fill in all fields');
-        return;
-      }
+      toggleMonitoringBtn.addEventListener("click", async () => {
+        if (isMonitoring) {
+          await window.electronAPI.stopMonitoring();
+          updateMonitoringUI(false);
+        } else {
+          await window.electronAPI.startMonitoring();
+          updateMonitoringUI(true);
+        }
+      });
 
-      loginBtn.disabled = true;
-      loginBtn.textContent = 'Connecting...';
+      startTimerBtn.addEventListener("click", async () => {
+        startTimerBtn.disabled = true;
+        startTimerBtn.textContent = "Starting...";
 
-      console.log('[RENDERER] Calling electronAPI.login...');
-      let result;
-      try {
-        result = await window.electronAPI.login({
-          serverUrl,
-          teamMemberId,
-          deviceName,
-          platform
-        });
-        console.log('[RENDERER] Login result received:', {
-          success: result.success,
-          hasError: !!result.error,
-          errorMessage: result.error
-        });
-      } catch (error) {
-        console.error('[RENDERER] Exception during login call:', error);
-        console.error('[RENDERER] Error details:', {
-          name: error.name,
-          message: error.message,
-          stack: error.stack
-        });
-        result = { success: false, error: error.message || 'Unexpected error occurred' };
-      }
+        const project = timerProject.value.trim() || null;
+        const result = await window.electronAPI.startTimer({ project });
 
-      loginBtn.disabled = false;
-      loginBtn.textContent = 'Connect Device';
+        startTimerBtn.disabled = false;
+        startTimerBtn.textContent = "Start Timer";
 
-      if (result.success) {
-        console.log('[RENDERER] Login successful, updating UI...');
-        updateUserUI(result.userName);
-        updateMonitoringUI(false);
+        if (result.success && result.entry) {
+          startTimerUI(result.entry);
+          await updateTimerStats();
+        }
+      });
+
+      stopTimerBtn.addEventListener("click", async () => {
+        stopTimerBtn.disabled = true;
+        stopTimerBtn.textContent = "Stopping...";
+
+        const result = await window.electronAPI.stopTimer();
+
+        stopTimerBtn.disabled = false;
+        stopTimerBtn.textContent = "Stop Timer";
+
+        if (result.success) {
+          stopTimerUI();
+          await updateTimerStats();
+        }
+      });
+
+      window.electronAPI.onTimerStatus((status) => {
+        if (status.running && status.entry) {
+          startTimerUI(status.entry);
+        } else {
+          stopTimerUI();
+        }
+        updateTimerStats();
+      });
+
+      window.electronAPI.onTimerTick(({ elapsed }) => {
+        timerDisplay.textContent = elapsed;
+
+        // Ensure running class is applied
+        if (!timerDisplay.classList.contains("running")) {
+          timerDisplay.classList.remove("stopped");
+          timerDisplay.classList.add("running");
+        }
+      });
+
+      refreshSettingsBtn.addEventListener("click", async () => {
+        refreshSettingsBtn.disabled = true;
+        refreshSettingsBtn.textContent = "Refreshing...";
         await updateSettingsUI();
-        showPage('dashboard');
-        console.log('[RENDERER] Dashboard page shown');
-      } else {
-        console.error('[RENDERER] Login failed:', result.error);
-        showError(result.error || 'Connection failed');
-      }
-    });
+        refreshSettingsBtn.disabled = false;
+        refreshSettingsBtn.textContent = "Refresh Settings";
+      });
 
-    toggleMonitoringBtn.addEventListener('click', async () => {
-      if (isMonitoring) {
-        await window.electronAPI.stopMonitoring();
-        updateMonitoringUI(false);
-      } else {
-        await window.electronAPI.startMonitoring();
-        updateMonitoringUI(true);
-      }
-    });
+      logoutBtn.addEventListener("click", async () => {
+        await window.electronAPI.logout();
+        showPage("login");
+      });
 
-    startTimerBtn.addEventListener('click', async () => {
-      startTimerBtn.disabled = true;
-      startTimerBtn.textContent = 'Starting...';
+      window.electronAPI.onMonitoringStatus((status) => {
+        updateMonitoringUI(status);
+      });
 
-      const project = timerProject.value.trim() || null;
-      const result = await window.electronAPI.startTimer({ project });
+      window.electronAPI.onNavigate((page) => {
+        if (page === "settings") {
+          updateSettingsUI();
+        }
+      });
 
-      startTimerBtn.disabled = false;
-      startTimerBtn.textContent = 'Start Timer';
-
-      if (result.success && result.entry) {
-        startTimerUI(result.entry);
-        await updateTimerStats();
-      }
-    });
-
-    stopTimerBtn.addEventListener('click', async () => {
-      stopTimerBtn.disabled = true;
-      stopTimerBtn.textContent = 'Stopping...';
-
-      const result = await window.electronAPI.stopTimer();
-
-      stopTimerBtn.disabled = false;
-      stopTimerBtn.textContent = 'Stop Timer';
-
-      if (result.success) {
-        stopTimerUI();
-        await updateTimerStats();
-      }
-    });
-
-    window.electronAPI.onTimerStatus((status) => {
-      if (status.running && status.entry) {
-        startTimerUI(status.entry);
-      } else {
-        stopTimerUI();
-      }
-      updateTimerStats();
-    });
-
-    refreshSettingsBtn.addEventListener('click', async () => {
-      refreshSettingsBtn.disabled = true;
-      refreshSettingsBtn.textContent = 'Refreshing...';
-      await updateSettingsUI();
-      refreshSettingsBtn.disabled = false;
-      refreshSettingsBtn.textContent = 'Refresh Settings';
-    });
-
-    logoutBtn.addEventListener('click', async () => {
-      await window.electronAPI.logout();
-      showPage('login');
-    });
-
-    window.electronAPI.onMonitoringStatus((status) => {
-      updateMonitoringUI(status);
-    });
-
-    window.electronAPI.onNavigate((page) => {
-      if (page === 'settings') {
-        updateSettingsUI();
-      }
-    });
-
-    init();
-  </script>
-</body>
-
+      init();
+    </script>
+  </body>
 </html>

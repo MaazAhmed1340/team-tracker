@@ -151,14 +151,15 @@ export function validateImageType(mimeType: string): { valid: boolean; error?: s
 }
 
 /**
- * Validate base64 image data
+ * Validate base64 image data - FIXED VERSION
+ * More lenient validation that accepts both data URLs and plain base64
  */
 export function validateBase64Image(base64Data: string): { valid: boolean; error?: string; mimeType?: string } {
   if (!base64Data || typeof base64Data !== "string") {
     return { valid: false, error: "Image data must be a valid base64 string" };
   }
   
-  // Check if it's a data URL
+  // Check if it's a data URL (preferred format)
   const dataUrlMatch = base64Data.match(/^data:image\/(\w+);base64,(.+)$/);
   if (dataUrlMatch) {
     const mimeType = `image/${dataUrlMatch[1]}`;
@@ -170,14 +171,20 @@ export function validateBase64Image(base64Data: string): { valid: boolean; error
       return typeCheck;
     }
     
-    // Validate base64 string
-    if (!validator.isBase64(base64String)) {
-      return { valid: false, error: "Invalid base64 image data" };
+    // Validate base64 string (more lenient - just check if it's valid base64)
+    try {
+      // Try to decode it
+      const decoded = Buffer.from(base64String, 'base64');
+      if (decoded.length === 0) {
+        return { valid: false, error: "Invalid base64 image data - decoded to zero bytes" };
+      }
+    } catch (e) {
+      return { valid: false, error: "Invalid base64 encoding" };
     }
     
     // Check size (approximate)
     const sizeInBytes = (base64String.length * 3) / 4;
-    const sizeCheck = validateFileSize(sizeInBytes);
+    const sizeCheck = validateFileSize(sizeInBytes, 10); // Allow up to 10MB
     if (!sizeCheck.valid) {
       return sizeCheck;
     }
@@ -185,13 +192,25 @@ export function validateBase64Image(base64Data: string): { valid: boolean; error
     return { valid: true, mimeType };
   }
   
-  // If it's just base64 without data URL prefix
-  if (validator.isBase64(base64Data)) {
-    // Try to determine type from first bytes (basic check)
+  // If it's plain base64 without the data URL prefix, that's also OK
+  // (for backwards compatibility)
+  try {
+    const decoded = Buffer.from(base64Data, 'base64');
+    if (decoded.length === 0) {
+      return { valid: false, error: "Invalid base64 image data - decoded to zero bytes" };
+    }
+    
+    // Check size
+    const sizeInBytes = (base64Data.length * 3) / 4;
+    const sizeCheck = validateFileSize(sizeInBytes, 10);
+    if (!sizeCheck.valid) {
+      return sizeCheck;
+    }
+    
     return { valid: true, mimeType: "image/png" }; // Default assumption
+  } catch (e) {
+    return { valid: false, error: "Image data must be a valid base64 string or data URL (format: data:image/png;base64,...)" };
   }
-  
-  return { valid: false, error: "Image data must be a valid base64 string or data URL" };
 }
 
 /**

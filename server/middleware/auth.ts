@@ -8,7 +8,7 @@ declare global {
         id: string;
         email: string;
         role: string;
-        companyId: string; 
+        companyId: string;
       };
     }
   }
@@ -27,7 +27,7 @@ export interface JWTPayload {
 }
 
 export function generateAccessToken(payload: JWTPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "15m" });
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: "1d" });
 }
 
 export function generateRefreshToken(payload: JWTPayload): string {
@@ -78,10 +78,10 @@ export function optionalAuth(req: Request, res: Response, next: NextFunction) {
         id: payload.id,
         email: payload.email,
         role: payload.role,
-        companyId: payload.companyId, 
+        companyId: payload.companyId,
       };
     } catch (error) {
-      // Ignore errors for optional auth
+      console.log("Error in optionalAuth:", error);
     }
   }
   next();

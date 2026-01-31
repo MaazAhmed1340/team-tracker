@@ -1,7 +1,9 @@
 import type { Express, NextFunction, Request, Response } from "express";
+
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
+import jwt from "jsonwebtoken";
 import {
   insertTeamMemberSchema,
   insertScreenshotSchema,
@@ -17,26 +19,12 @@ import { db } from "./db";
 import { z } from "zod";
 import { randomBytes } from "crypto";
 import * as fs from "fs";
-import * as path from "path";
+import path from "path";
 import bcrypt from "bcrypt";
 import { eq, sql } from "drizzle-orm";
-import {
-  generateAccessToken,
-  generateRefreshToken,
-  verifyRefreshToken,
-  authenticateToken,
-} from "./middleware/auth";
-import {
-  requireAdmin,
-  requireAdminOrManager,
-  canViewReports,
-} from "./middleware/permissions";
-import {
-  loginRateLimiter,
-  apiRateLimiter,
-  screenshotRateLimiter,
-  heartbeatRateLimiter,
-} from "./middleware/rate-limit";
+import { generateAccessToken, generateRefreshToken, verifyRefreshToken, authenticateToken } from "./middleware/auth";
+import { requireAdmin, requireAdminOrManager, canViewReports } from "./middleware/permissions";
+import { loginRateLimiter, apiRateLimiter, screenshotRateLimiter, heartbeatRateLimiter } from "./middleware/rate-limit";
 import { sanitizeInput } from "./middleware/validation";
 import {
   validateEmail,
@@ -48,28 +36,129 @@ import {
   validateUUID,
   validateNumericRange,
 } from "./utils/validation";
-import {
-  requireTeamMemberAccess,
-  canAccessTeamMember,
-  getTeamMemberIdForUser,
-} from "./middleware/data-access";
+import { requireTeamMemberAccess, canAccessTeamMember, getTeamMemberIdForUser } from "./middleware/data-access";
 
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Generate a secure random token
+ */
 function generateToken(): string {
   return randomBytes(32).toString("hex");
 }
 
-export async function registerRoutes(
-  httpServer: Server,
-  app: Express
-): Promise<Server> {
+/**
+ * Find user by ID or email (for agent registration)
+ */
+async function findUserByIdOrEmail(idOrEmail: string) {
+  const byId = await db.select().from(users).where(eq(users.id, idOrEmail)).limit(1);
+
+  if (byId?.length) return byId[0];
+
+  const byEmail = await db.select().from(users).where(eq(users.email, idOrEmail)).limit(1);
+
+  return byEmail?.[0];
+}
+
+// ============================================================================
+// MIDDLEWARE: AGENT AUTHENTICATION
+// ============================================================================
+
+/**
+ * Middleware to authenticate agent requests using JWT
+ * Attaches agent token info to request object
+ */
+async function agentAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+
+  console.log("[agentAuth] Authorization header:", authHeader ? "Present" : "Missing");
+
+  if (!authHeader?.startsWith("Bearer ")) {
+    console.error("[agentAuth] Missing or invalid authorization header");
+    return res.status(401).json({ error: "Missing authorization token" });
+  }
+
+  const token = authHeader.slice(7);
+  console.log("[agentAuth] Token (first 20 chars):", token.substring(0, 20));
+
+  try {
+    // First, try to verify as JWT token
+    const jwtSecret = process.env.JWT_SECRET || "dev-secret";
+    const decoded = jwt.verify(token, jwtSecret) as any;
+
+    console.log("[agentAuth] JWT verified, user ID:", decoded.sub || decoded.id);
+
+    // Get user info
+    const userId = decoded.sub || decoded.id;
+    const user = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+
+    if (!user || user.length === 0) {
+      console.error("[agentAuth] User not found:", userId);
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    // Get associated team member
+    const [member] = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId)).limit(1);
+
+    if (!member) {
+      console.error("[agentAuth] Team member not found for user:", userId);
+      return res.status(401).json({ error: "Team member not found" });
+    }
+
+    // Attach agent info to request
+    (req as any).agent = {
+      id: userId,
+      token,
+      teamMember: member,
+    };
+
+    console.log("[agentAuth] Authentication successful for:", member.name);
+    next();
+  } catch (jwtError) {
+    console.error("[agentAuth] JWT verification failed:", jwtError);
+
+    // Fallback: try legacy agent token system
+    try {
+      const agentToken = await storage.getAgentTokenByToken(token);
+
+      if (!agentToken) {
+        console.error("[agentAuth] Agent token not found in database");
+        return res.status(401).json({ error: "Invalid or expired token" });
+      }
+
+      console.log("[agentAuth] Legacy token verified for:", agentToken.teamMember.name);
+
+      (req as any).agent = agentToken;
+      next();
+    } catch (error) {
+      console.error("[agentAuth] All authentication methods failed:", error);
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+  }
+}
+
+// ============================================================================
+// WEBSOCKET SETUP
+// ============================================================================
+
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
   const clients = new Set<WebSocket>();
 
   wss.on("connection", (ws) => {
+    console.log("[WS] Client connected");
     clients.add(ws);
-    ws.on("close", () => clients.delete(ws));
+    ws.on("close", () => {
+      console.log("[WS] Client disconnected");
+      clients.delete(ws);
+    });
   });
 
+  /**
+   * Broadcast message to all connected WebSocket clients
+   */
   function broadcast(data: object) {
     const message = JSON.stringify(data);
     clients.forEach((client) => {
@@ -79,152 +168,150 @@ export async function registerRoutes(
     });
   }
 
-  // Authentication routes
+  // ============================================================================
+  // VALIDATION SCHEMAS
+  // ============================================================================
+
   const loginSchema = z.object({
-    email: z.string()
+    email: z
+      .string()
       .min(1, "Email is required")
       .max(255, "Email must be 255 characters or less")
-      .email("Email must be a valid email address (e.g., user@example.com)")
+      .email("Email must be a valid email address")
       .transform((val) => val.trim().toLowerCase()),
-    password: z.string()
-      .min(1, "Password is required")
-      .max(128, "Password must be 128 characters or less"),
+    password: z.string().min(1, "Password is required").max(128, "Password must be 128 characters or less"),
   });
 
-  // Combined company + first admin registration
   const companyRegisterSchema = z.object({
     companyName: z.string().min(1, "Company name is required"),
-    companyEmail: z.string()
-      .min(1, "Company email is required")
-      .email("Company email must be valid"),
+    companyEmail: z.string().min(1, "Company email is required").email("Company email must be valid"),
     companyWebsite: z.string().url().optional(),
-    adminEmail: z.string()
-      .min(1, "Admin email is required")
-      .email("Admin email must be valid"),
-    adminPassword: z.string()
-      .min(8, "Password must be at least 8 characters")
-      .max(128, "Password must be 128 characters or less"),
+    adminEmail: z.string().min(1, "Admin email is required").email("Admin email must be valid"),
+    adminPassword: z.string().min(8, "Password must be at least 8 characters").max(128, "Password must be 128 characters or less"),
   });
 
-  // Company (multi-tenant) routes
-  app.post("/api/companies", sanitizeInput, async (req: Request, res: Response) => {
-    try {
-      const data = insertCompanySchema.parse(req.body);
+  const createEmployeeSchema = insertTeamMemberSchema
+    .extend({
+      password: z.string().min(8, "Password must be at least 8 characters").max(128, "Password must be 128 characters or less"),
+    })
+    .omit({ userId: true });
 
-      // Basic uniqueness check on company email
-      const existing = await storage.getCompanyByEmail(data.email);
-      if (existing) {
-        return res.status(400).json({ error: "Company with this email already exists" });
-      }
+  const updateTeamMemberSchema = insertTeamMemberSchema.partial();
 
-      const company = await storage.createCompany(data);
-
-      res.status(201).json(company);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to create company" });
-    }
+  const agentRegisterSchema = z.object({
+    teamMemberId: z.string().min(1),
+    deviceName: z.string().min(1),
+    platform: z.enum(["windows", "macos", "linux"]),
   });
 
-  // Public endpoint: create a company + first admin user in one step
-  app.post("/api/auth/company-register", sanitizeInput, async (req: Request, res: Response) => {
-    try {
-      const data = companyRegisterSchema.parse(req.body);
-
-      // Ensure company email is unique
-      const existingCompany = await storage.getCompanyByEmail(data.companyEmail);
-      if (existingCompany) {
-        return res.status(400).json({ error: "A company with this email already exists" });
-      }
-
-      // Ensure admin email is unique
-      const existingUser = await storage.getUserByEmail(data.adminEmail);
-      if (existingUser) {
-        return res.status(400).json({ error: "A user with this email already exists" });
-      }
-
-      // Create company
-      const company = await storage.createCompany({
-        name: data.companyName,
-        email: data.companyEmail,
-        website: data.companyWebsite ?? null,
-        logoUrl: null,
-        stripeCustomerId: null,
-      });
-
-      // Create admin user for that company
-      const passwordHash = await bcrypt.hash(data.adminPassword, 10);
-      const user = await storage.createUser({
-        email: data.adminEmail,
-        password: passwordHash,
-        role: "admin",
-        companyId: company.id,
-      });
-
-      // Create team member row linked to the admin user
-      const [createdTeamMember] = await db.insert(teamMembers).values({
-        userId: user.id,
-        name: data.adminEmail.split("@")[0],
-        email: data.adminEmail,
-        role: "admin",
-      }).returning();
-
-      const tokenPayload = {
-        id: user.id,
-        email: user.email,
-        role: user.role!,
-        companyId: user.companyId,
-      };
-
-      const accessToken = generateAccessToken(tokenPayload);
-      const refreshToken = generateRefreshToken(tokenPayload);
-
-      await storage.updateUserRefreshToken(user.id, refreshToken);
-
-      res.cookie("refreshToken", refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      });
-
-      res.status(201).json({
-        accessToken,
-        user: {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          companyId: user.companyId,
-        },
-        teamMember: {
-          id: createdTeamMember.id,
-          name: createdTeamMember.name,
-          email: createdTeamMember.email,
-          role: createdTeamMember.role,
-        },
-        company,
-      });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to register company" });
-    }
+  const agentScreenshotSchema = z.object({
+    imageData: z.string().min(1),
+    mouseClicks: z.number().int().min(0).default(0),
+    keystrokes: z.number().int().min(0).default(0),
+    activityScore: z.number().min(0).max(100).default(0),
   });
+
+  const agentHeartbeatSchema = z.object({
+    status: z.enum(["online", "idle", "offline"]).optional(),
+    mouseClicks: z.number().int().min(0).optional(),
+    keystrokes: z.number().int().min(0).optional(),
+  });
+
+  const heartbeatSchema = z.object({
+    teamMemberId: z.string().min(1),
+    status: z.enum(["online", "idle", "offline"]).optional(),
+  });
+
+  const settingsSchema = z.object({
+    screenshotInterval: z.number().int().min(1).max(60).optional(),
+    enableActivityTracking: z.boolean().optional(),
+    enableMouseTracking: z.boolean().optional(),
+    enableKeyboardTracking: z.boolean().optional(),
+    enableNotifications: z.boolean().optional(),
+    idleThreshold: z.number().int().min(1).max(30).optional(),
+    blurSensitiveContent: z.boolean().optional(),
+    autoStartMonitoring: z.boolean().optional(),
+  });
+
+  const privacySettingsSchema = z.object({
+    blurScreenshots: z.boolean().optional(),
+    trackApps: z.boolean().optional(),
+    trackUrls: z.boolean().optional(),
+    workHoursStart: z
+      .string()
+      .nullable()
+      .optional()
+      .refine((val) => !val || /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(val)),
+    workHoursEnd: z
+      .string()
+      .nullable()
+      .optional()
+      .refine((val) => !val || /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(val)),
+    workHoursTimezone: z
+      .string()
+      .optional()
+      .refine((val) => !val || /^[A-Z][a-z]+(\/[A-Z][a-z]+)*$/.test(val) || val === "UTC"),
+    privacyMode: z.boolean().optional(),
+  });
+
+  const blurScreenshotSchema = z.object({
+    isBlurred: z.boolean(),
+  });
+
+  const startTimerSchema = z.object({
+    teamMemberId: z.string().min(1),
+    project: z.string().optional(),
+    notes: z.string().optional(),
+  });
+
+  const agentTimerStartSchema = z.object({
+    project: z.string().optional(),
+    notes: z.string().optional(),
+  });
+
+  const updateTimeEntrySchema = z.object({
+    project: z.string().optional(),
+    notes: z.string().optional(),
+    idleSeconds: z.number().int().min(0).optional(),
+  });
+
+  const manualTimeEntrySchema = z.object({
+    teamMemberId: z.string().min(1),
+    startTime: z.string().datetime(),
+    endTime: z.string().datetime(),
+    project: z.string().optional(),
+    notes: z.string().optional(),
+  });
+
+  const agentIdleUpdateSchema = z.object({
+    idleSeconds: z.number().int().min(0),
+  });
+
+  const appUsageSchema = z.object({
+    appName: z.string().min(1),
+    appType: z.enum(["application", "website"]).default("application"),
+    windowTitle: z.string().optional(),
+    url: z.string().optional(),
+  });
+
+  const updateUserRoleSchema = z.object({
+    role: z.enum(["admin", "manager", "viewer"]),
+  });
+
+  // ============================================================================
+  // AUTHENTICATION ROUTES
+  // ============================================================================
 
   app.post("/api/auth/login", loginRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
-      // Enhanced validation
       const emailValidation = validateEmail(req.body?.email);
       if (!emailValidation.valid) {
         return res.status(400).json({ error: emailValidation.error });
       }
 
       const data = loginSchema.parse(req.body);
-      
       const user = await storage.getUserByEmail(data.email);
+
       if (!user) {
         return res.status(401).json({ error: "Invalid email or password" });
       }
@@ -233,12 +320,7 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Your account is inactive" });
       }
 
-      // Ensure the user has been added as an employee (team member)
-      const [member] = await db
-        .select()
-        .from(teamMembers)
-        .where(eq(teamMembers.userId, user.id))
-        .limit(1);
+      const [member] = await db.select().from(teamMembers).where(eq(teamMembers.userId, user.id)).limit(1);
 
       if (!member) {
         return res.status(403).json({
@@ -268,7 +350,7 @@ export async function registerRoutes(
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
       res.json({
@@ -284,13 +366,13 @@ export async function registerRoutes(
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });
       }
-      res.status(500).json({ error});
+      console.error("[AUTH] Login error:", error);
+      res.status(500).json({ error: "Login failed" });
     }
   });
 
   app.post("/api/auth/register", sanitizeInput, async (req: Request, res: Response) => {
     try {
-      // Enhanced validation
       const emailValidation = validateEmail(req.body?.email);
       if (!emailValidation.valid) {
         return res.status(400).json({ error: emailValidation.error });
@@ -302,8 +384,8 @@ export async function registerRoutes(
       }
 
       const data = insertUserSchema.parse(req.body);
-      
       const existingUser = await storage.getUserByEmail(data.email);
+
       if (existingUser) {
         return res.status(400).json({ error: "Email already registered" });
       }
@@ -317,13 +399,15 @@ export async function registerRoutes(
         companyId: data.companyId,
       });
 
-      // Create a team member for the user
-      const [createdTeamMember] = await db.insert(teamMembers).values({
-        userId: user.id,
-        name: data.email.split("@")[0], // Use email prefix as default name
-        email: data.email,
-        role: "member",
-      }).returning();
+      const [createdTeamMember] = await db
+        .insert(teamMembers)
+        .values({
+          userId: user.id,
+          name: data.email.split("@")[0],
+          email: data.email,
+          role: "member",
+        })
+        .returning();
 
       const tokenPayload = {
         id: user.id,
@@ -341,7 +425,7 @@ export async function registerRoutes(
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
       res.status(201).json({
@@ -361,7 +445,96 @@ export async function registerRoutes(
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });
       }
-      res.status(500).json({ error: "Failed to register" });
+      console.error("[AUTH] Registration error:", error);
+      res.status(500).json({ error: "Registration failed" });
+    }
+  });
+
+  app.post("/api/auth/company-register", sanitizeInput, async (req: Request, res: Response) => {
+    try {
+      const data = companyRegisterSchema.parse(req.body);
+
+      const existingCompany = await storage.getCompanyByEmail(data.companyEmail);
+      if (existingCompany) {
+        return res.status(400).json({
+          error: "A company with this email already exists",
+        });
+      }
+
+      const existingUser = await storage.getUserByEmail(data.adminEmail);
+      if (existingUser) {
+        return res.status(400).json({
+          error: "A user with this email already exists",
+        });
+      }
+
+      const company = await storage.createCompany({
+        name: data.companyName,
+        email: data.companyEmail,
+        website: data.companyWebsite ?? null,
+        logoUrl: null,
+        stripeCustomerId: null,
+      });
+
+      const passwordHash = await bcrypt.hash(data.adminPassword, 10);
+      const user = await storage.createUser({
+        email: data.adminEmail,
+        password: passwordHash,
+        role: "admin",
+        companyId: company.id,
+      });
+
+      const [createdTeamMember] = await db
+        .insert(teamMembers)
+        .values({
+          userId: user.id,
+          name: data.adminEmail.split("@")[0],
+          email: data.adminEmail,
+          role: "admin",
+        })
+        .returning();
+
+      const tokenPayload = {
+        id: user.id,
+        email: user.email,
+        role: user.role!,
+        companyId: user.companyId,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      await storage.updateUserRefreshToken(user.id, refreshToken);
+
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+
+      res.status(201).json({
+        accessToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          companyId: user.companyId,
+        },
+        teamMember: {
+          id: createdTeamMember.id,
+          name: createdTeamMember.name,
+          email: createdTeamMember.email,
+          role: createdTeamMember.role,
+        },
+        company,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("[AUTH] Company registration error:", error);
+      res.status(500).json({ error: "Failed to register company" });
     }
   });
 
@@ -380,14 +553,14 @@ export async function registerRoutes(
   app.post("/api/auth/refresh", async (req, res) => {
     try {
       const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
-      
+
       if (!refreshToken) {
         return res.status(401).json({ error: "Refresh token required" });
       }
 
       const payload = verifyRefreshToken(refreshToken);
-      
       const user = await storage.getUser(payload.id);
+
       if (!user || user.refreshToken !== refreshToken) {
         return res.status(403).json({ error: "Invalid refresh token" });
       }
@@ -408,12 +581,10 @@ export async function registerRoutes(
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
-      res.json({
-        accessToken: newAccessToken,
-      });
+      res.json({ accessToken: newAccessToken });
     } catch (error) {
       if (error instanceof Error && error.name === "JsonWebTokenError") {
         return res.status(403).json({ error: "Invalid refresh token" });
@@ -444,6 +615,510 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================================
+  // AGENT AUTHENTICATION ROUTES
+  // ============================================================================
+
+  app.post("/api/agent/register", async (req: Request, res: Response) => {
+    console.log("[AGENT_REGISTER] Request received:", req.body);
+
+    try {
+      const { teamMemberId, deviceName, platform } = req.body || {};
+
+      if (!teamMemberId) {
+        return res.status(400).json({ error: "teamMemberId is required" });
+      }
+
+      console.log("[AGENT_REGISTER] Looking up user:", teamMemberId);
+      const user = await findUserByIdOrEmail(teamMemberId);
+
+      if (!user) {
+        console.error("[AGENT_REGISTER] User not found:", teamMemberId);
+        return res.status(404).json({ error: "Team member not found" });
+      }
+
+      if (!user.isActive) {
+        console.error("[AGENT_REGISTER] User not active:", teamMemberId);
+        return res.status(403).json({ error: "Team member not active" });
+      }
+
+      console.log("[AGENT_REGISTER] User found:", user.email);
+
+      // Generate JWT token
+      const jwtSecret = process.env.JWT_SECRET || "dev-secret";
+      const token = jwt.sign(
+        {
+          sub: user.id,
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          companyId: user.companyId,
+        },
+        jwtSecret,
+        { expiresIn: "7d" },
+      );
+
+      console.log("[AGENT_REGISTER] JWT token generated");
+      console.log("[AGENT_REGISTER] Token (first 20 chars):", token.substring(0, 20));
+
+      const agentId = crypto.randomUUID();
+      const userName = `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email.split("@")[0];
+
+      console.log("[AGENT_REGISTER] Registration successful for:", userName);
+
+      return res.json({
+        token,
+        agentId,
+        teamMember: {
+          id: user.id,
+          name: userName,
+        },
+      });
+    } catch (error) {
+      console.error("[AGENT_REGISTER] Registration failed:", error);
+      return res.status(500).json({ error: "Failed to register agent" });
+    }
+  });
+
+  app.post("/api/agent/login", async (req: Request, res: Response) => {
+    console.log("[AGENT_LOGIN] Request received:", req.body);
+
+    try {
+      const { teamMemberId, deviceName, platform } = req.body || {};
+
+      if (!teamMemberId) {
+        return res.status(400).json({ error: "teamMemberId is required" });
+      }
+
+      const user = await findUserByIdOrEmail(teamMemberId);
+
+      if (!user) {
+        return res.status(404).json({ error: "Team member not found" });
+      }
+
+      if (!user.isActive) {
+        return res.status(403).json({ error: "Team member not active" });
+      }
+
+      const jwtSecret = process.env.JWT_SECRET || "dev-secret";
+      const token = jwt.sign(
+        {
+          sub: user.id,
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          companyId: user.companyId,
+        },
+        jwtSecret,
+        { expiresIn: "7d" },
+      );
+
+      const agentId = crypto.randomUUID();
+      const userName = `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email.split("@")[0];
+
+      console.log("[AGENT_LOGIN] Login successful for:", userName);
+
+      return res.json({
+        token,
+        agentId,
+        teamMember: {
+          id: user.id,
+          name: userName,
+        },
+      });
+    } catch (error) {
+      console.error("[AGENT_LOGIN] Login failed:", error);
+      return res.status(500).json({ error: "Failed to login" });
+    }
+  });
+
+  // ============================================================================
+  // AGENT ROUTES (Protected with agentAuth)
+  // ============================================================================
+
+  app.post("/api/agent/screenshot", screenshotRateLimiter, agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+
+      console.log("[SCREENSHOT_UPLOAD] From:", agent.teamMember.name);
+      console.log("[SCREENSHOT_UPLOAD] TeamMemberID:", agent.teamMember.id);
+
+      // 1. Validate request body
+      const data = agentScreenshotSchema.parse(req.body);
+
+      console.log("[SCREENSHOT_UPLOAD] Activity:", {
+        mouseClicks: data.mouseClicks,
+        keystrokes: data.keystrokes,
+        activityScore: data.activityScore,
+      });
+
+      // 2. Validate & extract base64 image
+      const match = data.imageData.match(/^data:image\/(png|jpeg|jpg)(;charset=[^;]+)?;base64,([\s\S]+)$/);
+
+      if (!match) {
+        console.error("[SCREENSHOT_UPLOAD] Invalid image format:", data.imageData.slice(0, 50));
+        return res.status(400).json({ error: "Invalid image format" });
+      }
+
+      const imageType = match[1];
+      const base64Data = match[3];
+
+      // 3. Decode base64 → buffer (real bytes)
+      let imageBuffer: Buffer;
+      try {
+        imageBuffer = Buffer.from(base64Data, "base64");
+      } catch {
+        console.error("[SCREENSHOT_UPLOAD] Base64 decode failed");
+        return res.status(400).json({ error: "Invalid base64 image data" });
+      }
+
+      // 4. Validate size (real size, not estimated)
+      const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+      if (imageBuffer.length === 0 || imageBuffer.length > MAX_SIZE) {
+        console.error("[SCREENSHOT_UPLOAD] Invalid file size:", imageBuffer.length);
+        return res.status(400).json({ error: "Invalid file size" });
+      }
+
+      console.log("[SCREENSHOT_UPLOAD] Image size:", Math.round(imageBuffer.length / 1024), "KB");
+
+      // 5. Ensure uploads directory exists
+      const uploadsDir = path.join(process.cwd(), "uploads", "screenshots");
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+
+      // 6. Generate filename & write ONCE
+      const fileName = `${Date.now()}-${agent.teamMember.id}.${imageType}`;
+      const filePath = path.join(uploadsDir, fileName);
+
+      fs.writeFileSync(filePath, imageBuffer);
+      console.log("[SCREENSHOT_UPLOAD] File saved:", filePath);
+
+      const imageUrl = `/uploads/screenshots/${fileName}`;
+
+      // 7. Save DB record
+      const screenshot = await storage.createScreenshot({
+        teamMemberId: agent.teamMember.id,
+        imageUrl,
+        mouseClicks: data.mouseClicks,
+        keystrokes: data.keystrokes,
+        activityScore: data.activityScore,
+      });
+
+      console.log("[SCREENSHOT_UPLOAD] DB ID:", screenshot.id);
+
+      // 8. Update presence
+      await storage.updateTeamMember(agent.teamMember.id, {
+        status: "online",
+      });
+
+      if (agent.id) {
+        await storage.updateAgentTokenLastSeen(agent.id);
+      }
+
+      // 9. Broadcast event
+      broadcast({
+        type: "SCREENSHOT_ADDED",
+        screenshot,
+      });
+
+      // 10. Respond
+      return res.status(201).json({
+        success: true,
+        screenshotId: screenshot.id,
+        imageUrl,
+        timestamp: screenshot.capturedAt,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        console.error("[SCREENSHOT_UPLOAD] Zod error:", error.errors);
+        return res.status(400).json({ error: error.errors });
+      }
+
+      console.error("[SCREENSHOT_UPLOAD] Fatal error:", error);
+      return res.status(500).json({ error: "Failed to upload screenshot" });
+    }
+  });
+  
+  app.post("/api/agent/heartbeat", heartbeatRateLimiter, agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+      const data = agentHeartbeatSchema.parse(req.body);
+
+      console.log("[AGENT_HEARTBEAT] Received from:", agent.teamMember.name);
+
+      const member = await storage.updateTeamMember(agent.teamMember.id, {
+        status: data.status || "online",
+      });
+
+      // Update last seen for legacy agent tokens
+      if (agent.id) {
+        await storage.updateAgentTokenLastSeen(agent.id);
+      }
+
+      if (member) {
+        broadcast({ type: "STATUS_CHANGED", member });
+      }
+
+      const settings = await storage.getSettings();
+      const updatedMember = await storage.getTeamMember(agent.teamMember.id);
+
+      res.json({
+        success: true,
+        settings: {
+          screenshotInterval: updatedMember?.screenshotInterval || settings.screenshotInterval,
+          enableActivityTracking: settings.enableActivityTracking,
+          enableMouseTracking: settings.enableMouseTracking,
+          enableKeyboardTracking: settings.enableKeyboardTracking,
+        },
+        privacy: {
+          privacyMode: updatedMember?.privacyMode ?? false,
+          blurScreenshots: updatedMember?.blurScreenshots ?? false,
+          trackApps: updatedMember?.trackApps ?? true,
+          trackUrls: updatedMember?.trackUrls ?? true,
+          workHoursStart: updatedMember?.workHoursStart,
+          workHoursEnd: updatedMember?.workHoursEnd,
+          workHoursTimezone: updatedMember?.workHoursTimezone || "UTC",
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("[AGENT] Heartbeat error:", error);
+      res.status(500).json({ error: "Failed to process heartbeat" });
+    }
+  });
+
+  app.get("/api/agent/settings", agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+      const settings = await storage.getSettings();
+      const member = agent.teamMember;
+
+      res.json({
+        screenshotInterval: member.screenshotInterval || settings.screenshotInterval,
+        enableActivityTracking: settings.enableActivityTracking,
+        enableMouseTracking: settings.enableMouseTracking,
+        enableKeyboardTracking: settings.enableKeyboardTracking,
+        isMonitoring: member.isMonitoring,
+        privacy: {
+          privacyMode: member.privacyMode ?? false,
+          blurScreenshots: member.blurScreenshots ?? false,
+          trackApps: member.trackApps ?? true,
+          trackUrls: member.trackUrls ?? true,
+          workHoursStart: member.workHoursStart,
+          workHoursEnd: member.workHoursEnd,
+          workHoursTimezone: member.workHoursTimezone || "UTC",
+        },
+      });
+    } catch (error) {
+      console.error("[AGENT] Get settings error:", error);
+      res.status(500).json({ error: "Failed to get agent settings" });
+    }
+  });
+
+  // ============================================================================
+  // AGENT TIMER ROUTES
+  // ============================================================================
+
+  app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+      const data = agentTimerStartSchema.parse(req.body);
+
+      console.log("[AGENT_TIMER] Start request from:", agent.teamMember.name);
+
+      const existingActive = await storage.getActiveTimeEntry(agent.teamMember.id);
+      if (existingActive) {
+        console.log("[AGENT_TIMER] Timer already running");
+        return res.status(400).json({
+          error: "Timer already running",
+          activeEntry: existingActive,
+        });
+      }
+
+      const entry = await storage.createTimeEntry({
+        teamMemberId: agent.teamMember.id,
+        startTime: new Date(),
+        project: data.project || null,
+        notes: data.notes || null,
+        isActive: true,
+        idleSeconds: 0,
+      });
+
+      await storage.updateTeamMember(agent.teamMember.id, { status: "online" });
+
+      // Update last seen for legacy agent tokens
+      if (agent.id) {
+        await storage.updateAgentTokenLastSeen(agent.id);
+      }
+
+      broadcast({ type: "TIMER_STARTED", entry });
+
+      console.log("[AGENT_TIMER] Timer started successfully");
+      res.status(201).json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("[AGENT_TIMER] Start error:", error);
+      res.status(500).json({ error: "Failed to start timer" });
+    }
+  });
+
+  app.post("/api/agent/timer/stop", agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+
+      console.log("[AGENT_TIMER] Stop request from:", agent.teamMember.name);
+
+      const activeEntry = await storage.getActiveTimeEntry(agent.teamMember.id);
+      if (!activeEntry) {
+        console.log("[AGENT_TIMER] No active timer found");
+        return res.status(404).json({ error: "No active timer found" });
+      }
+
+      const entry = await storage.stopTimeEntry(activeEntry.id);
+
+      // Update last seen for legacy agent tokens
+      if (agent.id) {
+        await storage.updateAgentTokenLastSeen(agent.id);
+      }
+
+      broadcast({ type: "TIMER_STOPPED", entry });
+
+      console.log("[AGENT_TIMER] Timer stopped successfully");
+      res.json(entry);
+    } catch (error) {
+      console.error("[AGENT_TIMER] Stop error:", error);
+      res.status(500).json({ error: "Failed to stop timer" });
+    }
+  });
+
+  app.get("/api/agent/timer/status", agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+      const activeEntry = await storage.getActiveTimeEntry(agent.teamMember.id);
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStats = await storage.getMemberTimeStats(agent.teamMember.id, today);
+
+      res.json({
+        isRunning: !!activeEntry,
+        activeEntry,
+        todayStats,
+      });
+    } catch (error) {
+      console.error("[AGENT_TIMER] Get status error:", error);
+      res.status(500).json({ error: "Failed to get timer status" });
+    }
+  });
+
+  app.post("/api/agent/timer/idle", agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+      const data = agentIdleUpdateSchema.parse(req.body);
+
+      const activeEntry = await storage.getActiveTimeEntry(agent.teamMember.id);
+      if (!activeEntry) {
+        return res.status(404).json({ error: "No active timer found" });
+      }
+
+      const entry = await storage.updateTimeEntry(activeEntry.id, {
+        idleSeconds: (activeEntry.idleSeconds || 0) + data.idleSeconds,
+      });
+
+      res.json(entry);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("[AGENT_TIMER] Idle update error:", error);
+      res.status(500).json({ error: "Failed to update idle time" });
+    }
+  });
+
+  // ============================================================================
+  // AGENT APP USAGE ROUTES
+  // ============================================================================
+
+  app.post("/api/agent/app-usage", agentAuth, async (req: Request, res: Response) => {
+    try {
+      const agent = (req as any).agent;
+      const data = appUsageSchema.parse(req.body);
+
+      // Update last seen for legacy agent tokens
+      if (agent.id) {
+        await storage.updateAgentTokenLastSeen(agent.id);
+      }
+
+      const activeUsage = await storage.getActiveAppUsage(agent.teamMember.id);
+
+      if (activeUsage) {
+        if (activeUsage.appName === data.appName && activeUsage.windowTitle === data.windowTitle) {
+          return res.json({ status: "unchanged", usage: activeUsage });
+        }
+
+        await storage.endAppUsage(activeUsage.id);
+      }
+
+      const usage = await storage.createAppUsage({
+        teamMemberId: agent.teamMember.id,
+        appName: data.appName,
+        appType: data.appType,
+        windowTitle: data.windowTitle,
+        url: data.url,
+        startTime: new Date(),
+        isActive: true,
+      });
+
+      broadcast({
+        type: "APP_USAGE_CHANGED",
+        memberId: agent.teamMember.id,
+        usage,
+      });
+
+      res.json({ status: "created", usage });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("[AGENT] App usage error:", error);
+      res.status(500).json({ error: "Failed to record app usage" });
+    }
+  });
+
+  // ============================================================================
+  // COMPANY ROUTES
+  // ============================================================================
+
+  app.post("/api/companies", sanitizeInput, async (req: Request, res: Response) => {
+    try {
+      const data = insertCompanySchema.parse(req.body);
+
+      const existing = await storage.getCompanyByEmail(data.email);
+      if (existing) {
+        return res.status(400).json({
+          error: "Company with this email already exists",
+        });
+      }
+
+      const company = await storage.createCompany(data);
+      res.status(201).json(company);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create company" });
+    }
+  });
+
+  // ============================================================================
+  // DASHBOARD ROUTES
+  // ============================================================================
+
   app.get("/api/dashboard/stats", authenticateToken, apiRateLimiter, async (req, res) => {
     try {
       const companyId = req.user!.companyId;
@@ -464,6 +1139,10 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================================
+  // TEAM MEMBER ROUTES
+  // ============================================================================
+
   app.get("/api/team-members", authenticateToken, apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
       const userRole = req.user!.role;
@@ -477,6 +1156,7 @@ export async function registerRoutes(
       if (!myMemberId) {
         return res.json([]);
       }
+
       const myMember = await storage.getTeamMember(myMemberId);
       res.json(myMember ? [myMember] : []);
     } catch (error) {
@@ -484,23 +1164,22 @@ export async function registerRoutes(
     }
   });
 
-app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async (req, res) => {
-  try {
-    const userId = req.user!.id;
-    const userRole = req.user!.role;
+  app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const userRole = req.user!.role;
 
-    if (userRole !== "admin" && userRole !== "manager") {
-      return res.status(403).json({ error: "Access denied" });
+      if (userRole !== "admin" && userRole !== "manager") {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const members = await storage.getTeamMembersWithStats(userId);
+      res.json(members);
+    } catch (error) {
+      console.error("Failed to get team members with stats:", error);
+      res.status(500).json({ error: "Failed to get team members with stats" });
     }
-
-    const members = await storage.getTeamMembersWithStats(userId);
-    res.json(members);
-  } catch (error) {
-    console.error("Failed to get team members with stats:", error);
-    res.status(500).json({ error: "Failed to get team members with stats" });
-  }
-});
-
+  });
 
   app.get("/api/team-members/:id", authenticateToken, apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
@@ -508,10 +1187,12 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const member = await storage.getTeamMember(req.params.id);
       if (!member) {
         return res.status(404).json({ error: "Team member not found" });
       }
+
       res.json(member);
     } catch (error) {
       res.status(500).json({ error: "Failed to get team member" });
@@ -524,6 +1205,7 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const stats = await storage.getMemberStats(req.params.id);
       res.json(stats);
     } catch (error) {
@@ -537,6 +1219,7 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const timeline = await storage.getTimeline(req.params.id);
       res.json(timeline);
     } catch (error) {
@@ -544,18 +1227,8 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  // Schema for creating an employee (user + team member)
-  const createEmployeeSchema = insertTeamMemberSchema
-    .extend({
-      password: z.string()
-        .min(8, "Password must be at least 8 characters")
-        .max(128, "Password must be 128 characters or less"),
-    })
-    .omit({ userId: true });
-
   app.post("/api/team-members", authenticateToken, requireAdminOrManager, sanitizeInput, async (req: Request, res: Response) => {
     try {
-      // Enhanced validation
       if (req.body?.email) {
         const emailValidation = validateEmail(req.body.email);
         if (!emailValidation.valid) {
@@ -576,37 +1249,36 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
         return res.status(401).json({ error: "Authentication required" });
       }
 
-      // Find the admin/manager's user to inherit companyId
       const adminUser = await storage.getUser(req.user.id);
       if (!adminUser) {
         return res.status(401).json({ error: "Admin user not found" });
       }
 
-      // Ensure no existing user with that email
       const existingUser = await storage.getUserByEmail(data.email);
       if (existingUser) {
-        return res.status(400).json({ error: "A user with this email already exists" });
+        return res.status(400).json({
+          error: "A user with this email already exists",
+        });
       }
 
       const passwordHash = await bcrypt.hash(data.password, 10);
 
-      // Create user account for the employee
       const employeeUser = await storage.createUser({
         email: data.email,
         password: passwordHash,
-        role: "viewer", // auth-level role; permissions middleware enforces access
+        role: "viewer",
         companyId: adminUser.companyId,
       });
 
       const { password, ...memberData } = data;
 
-      // Create team member linked to the user
       const member = await storage.createTeamMember({
         ...memberData,
         userId: employeeUser.id,
       });
 
       broadcast({ type: "MEMBER_ADDED", member });
+
       res.status(201).json({
         member,
         user: {
@@ -624,19 +1296,20 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  const updateTeamMemberSchema = insertTeamMemberSchema.partial();
-
   app.patch("/api/team-members/:id", authenticateToken, requireAdminOrManager, async (req, res) => {
     try {
       const access = await canAccessTeamMember(req.user!.id, req.params.id);
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const data = updateTeamMemberSchema.parse(req.body);
       const member = await storage.updateTeamMember(req.params.id, data);
+
       if (!member) {
         return res.status(404).json({ error: "Team member not found" });
       }
+
       broadcast({ type: "MEMBER_UPDATED", member });
       res.json(member);
     } catch (error) {
@@ -649,7 +1322,7 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
 
   app.delete("/api/team-members/:id", authenticateToken, requireAdmin, async (req, res) => {
     try {
-      const success = await storage.deleteTeamMember(req.params.id);
+      await storage.deleteTeamMember(req.params.id);
       broadcast({ type: "MEMBER_DELETED", id: req.params.id });
       res.status(204).send();
     } catch (error) {
@@ -657,162 +1330,9 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  app.get("/api/screenshots", authenticateToken, apiRateLimiter, async (req, res) => {
-    try {
-      const memberId = req.query.memberId as string | undefined;
-      const userRole = req.user!.role;
-      const companyId = req.user!.companyId;
-
-      if (memberId) {
-        const access = await canAccessTeamMember(req.user!.id, memberId);
-        if (!access.allowed) {
-          return res.status(403).json({ error: access.reason || "Access denied" });
-        }
-        const screenshots = await storage.getScreenshotsByMember(memberId);
-        return res.json(screenshots);
-      }
-
-      if (userRole === "admin" || userRole === "manager") {
-        const screenshots = await storage.getScreenshotsByCompany(companyId);
-        return res.json(screenshots);
-      }
-
-      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
-      if (!myMemberId) {
-        return res.json([]);
-      }
-      const screenshots = await storage.getScreenshotsByMember(myMemberId);
-      res.json(screenshots);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get screenshots" });
-    }
-  });
-
-  app.get("/api/screenshots/recent", authenticateToken, apiRateLimiter, async (req, res) => {
-    try {
-      const userRole = req.user!.role;
-      const companyId = req.user!.companyId;
-
-      if (userRole === "admin" || userRole === "manager") {
-        const screenshots = await storage.getRecentScreenshotsByCompany(companyId, 8);
-        return res.json(screenshots);
-      }
-
-      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
-      if (!myMemberId) {
-        return res.json([]);
-      }
-      const screenshots = await storage.getScreenshotsByMember(myMemberId);
-      res.json(screenshots.slice(0, 8));
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get recent screenshots" });
-    }
-  });
-
-  app.get("/api/screenshots/:id", authenticateToken, apiRateLimiter, async (req, res) => {
-    try {
-      const screenshot = await storage.getScreenshot(req.params.id);
-      if (!screenshot) {
-        return res.status(404).json({ error: "Screenshot not found" });
-      }
-      const access = await canAccessTeamMember(req.user!.id, screenshot.teamMemberId);
-      if (!access.allowed) {
-        return res.status(403).json({ error: access.reason || "Access denied" });
-      }
-      res.json(screenshot);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get screenshot" });
-    }
-  });
-
-  app.post("/api/screenshots", async (req, res) => {
-    try {
-      const data = insertScreenshotSchema.parse(req.body);
-      const screenshot = await storage.createScreenshot(data);
-      
-      await storage.updateTeamMember(data.teamMemberId, {
-        status: "online",
-      });
-      
-      broadcast({ type: "SCREENSHOT_ADDED", screenshot });
-      res.status(201).json(screenshot);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to create screenshot" });
-    }
-  });
-
-  app.delete("/api/screenshots/:id", authenticateToken, requireAdminOrManager, async (req, res) => {
-    try {
-      const screenshot = await storage.getScreenshot(req.params.id);
-      if (!screenshot) {
-        return res.status(404).json({ error: "Screenshot not found" });
-      }
-      const access = await canAccessTeamMember(req.user!.id, screenshot.teamMemberId);
-      if (!access.allowed) {
-        return res.status(403).json({ error: access.reason || "Access denied" });
-      }
-      await storage.deleteScreenshot(req.params.id);
-      res.status(204).send();
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete screenshot" });
-    }
-  });
-
-  const blurScreenshotSchema = z.object({
-    isBlurred: z.boolean(),
-  });
-
-  app.patch("/api/screenshots/:id/blur", authenticateToken, requireAdminOrManager, async (req, res) => {
-    try {
-      const existingScreenshot = await storage.getScreenshot(req.params.id);
-      if (!existingScreenshot) {
-        return res.status(404).json({ error: "Screenshot not found" });
-      }
-      const access = await canAccessTeamMember(req.user!.id, existingScreenshot.teamMemberId);
-      if (!access.allowed) {
-        return res.status(403).json({ error: access.reason || "Access denied" });
-      }
-      const data = blurScreenshotSchema.parse(req.body);
-      const screenshot = await storage.updateScreenshotBlur(req.params.id, data.isBlurred);
-      if (!screenshot) {
-        return res.status(404).json({ error: "Screenshot not found" });
-      }
-      broadcast({ type: "SCREENSHOT_UPDATED", screenshot });
-      res.json(screenshot);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to update screenshot" });
-    }
-  });
-
-  const privacySettingsSchema = z.object({
-    blurScreenshots: z.boolean().optional(),
-    trackApps: z.boolean().optional(),
-    trackUrls: z.boolean().optional(),
-    workHoursStart: z.string()
-      .nullable()
-      .optional()
-      .refine((val) => !val || /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(val), {
-        message: "workHoursStart must be in HH:mm format (e.g., 09:00, 17:30)"
-      }),
-    workHoursEnd: z.string()
-      .nullable()
-      .optional()
-      .refine((val) => !val || /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(val), {
-        message: "workHoursEnd must be in HH:mm format (e.g., 09:00, 17:30)"
-      }),
-    workHoursTimezone: z.string()
-      .optional()
-      .refine((val) => !val || /^[A-Z][a-z]+(\/[A-Z][a-z]+)*$/.test(val) || val === "UTC", {
-        message: "workHoursTimezone must be a valid IANA timezone (e.g., America/New_York, UTC)"
-      }),
-    privacyMode: z.boolean().optional(),
-  });
+  // ============================================================================
+  // PRIVACY SETTINGS ROUTES
+  // ============================================================================
 
   app.get("/api/team-members/:id/privacy", authenticateToken, async (req, res) => {
     try {
@@ -820,10 +1340,12 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const member = await storage.getTeamMember(req.params.id);
       if (!member) {
         return res.status(404).json({ error: "Team member not found" });
       }
+
       res.json({
         blurScreenshots: member.blurScreenshots,
         trackApps: member.trackApps,
@@ -844,13 +1366,12 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
-      // Validate ID format
+
       const idValidation = validateUUID(req.params.id, "Team member ID");
       if (!idValidation.valid) {
         return res.status(400).json({ error: idValidation.error });
       }
 
-      // Validate time fields if provided
       if (req.body.workHoursStart) {
         const timeValidation = validateTimeFormat(req.body.workHoursStart, "workHoursStart");
         if (!timeValidation.valid) {
@@ -872,30 +1393,28 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
         }
       }
 
-      // Validate time range if both times are provided
       if (req.body.workHoursStart && req.body.workHoursEnd) {
-        const timeRangeValidation = validateTimeFormat(req.body.workHoursStart, "workHoursStart");
-        const timeRangeValidation2 = validateTimeFormat(req.body.workHoursEnd, "workHoursEnd");
-        if (timeRangeValidation.valid && timeRangeValidation2.valid) {
-          const [startHour, startMin] = req.body.workHoursStart.split(":").map(Number);
-          const [endHour, endMin] = req.body.workHoursEnd.split(":").map(Number);
-          const startMinutes = startHour * 60 + startMin;
-          const endMinutes = endHour * 60 + endMin;
-          
-          if (startMinutes >= endMinutes) {
-            return res.status(400).json({ 
-              error: "workHoursStart must be before workHoursEnd" 
-            });
-          }
+        const [startHour, startMin] = req.body.workHoursStart.split(":").map(Number);
+        const [endHour, endMin] = req.body.workHoursEnd.split(":").map(Number);
+        const startMinutes = startHour * 60 + startMin;
+        const endMinutes = endHour * 60 + endMin;
+
+        if (startMinutes >= endMinutes) {
+          return res.status(400).json({
+            error: "workHoursStart must be before workHoursEnd",
+          });
         }
       }
 
       const data = privacySettingsSchema.parse(req.body);
       const member = await storage.updateTeamMember(req.params.id, data);
+
       if (!member) {
         return res.status(404).json({ error: "Team member not found" });
       }
+
       broadcast({ type: "PRIVACY_UPDATED", member });
+
       res.json({
         blurScreenshots: member.blurScreenshots,
         trackApps: member.trackApps,
@@ -913,6 +1432,191 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
+  app.get("/api/team-members/:id/devices", authenticateToken, async (req, res) => {
+    try {
+      const access = await canAccessTeamMember(req.user!.id, req.params.id);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
+
+      const devices = await storage.getAgentTokensByMember(req.params.id);
+      res.json(devices);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get devices" });
+    }
+  });
+
+  app.delete("/api/agent/devices/:id", async (req, res) => {
+    try {
+      await storage.deactivateAgentToken(req.params.id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to deactivate device" });
+    }
+  });
+
+  // ============================================================================
+  // SCREENSHOT ROUTES
+  // ============================================================================
+
+  app.get("/api/screenshots", authenticateToken, apiRateLimiter, async (req, res) => {
+    try {
+      const memberId = req.query.memberId as string | undefined;
+      const userRole = req.user!.role;
+      const companyId = req.user!.companyId;
+
+      if (memberId) {
+        const access = await canAccessTeamMember(req.user!.id, memberId);
+        if (!access.allowed) {
+          return res.status(403).json({ error: access.reason || "Access denied" });
+        }
+
+        const screenshots = await storage.getScreenshotsByMember(memberId);
+        return res.json(screenshots);
+      }
+
+      if (userRole === "admin" || userRole === "manager") {
+        const screenshots = await storage.getScreenshotsByCompany(companyId);
+        return res.json(screenshots);
+      }
+
+      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
+      if (!myMemberId) {
+        return res.json([]);
+      }
+
+      const screenshots = await storage.getScreenshotsByMember(myMemberId);
+      res.json(screenshots);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get screenshots" });
+    }
+  });
+
+  app.get("/api/screenshots/recent", authenticateToken, apiRateLimiter, async (req, res) => {
+    try {
+      const userRole = req.user!.role;
+      const companyId = req.user!.companyId;
+
+      if (userRole === "admin" || userRole === "manager") {
+        const screenshots = await storage.getRecentScreenshotsByCompany(companyId, 8);
+        return res.json(screenshots);
+      }
+
+      const myMemberId = await getTeamMemberIdForUser(req.user!.id);
+      if (!myMemberId) {
+        return res.json([]);
+      }
+
+      const screenshots = await storage.getScreenshotsByMember(myMemberId);
+      res.json(screenshots.slice(0, 8));
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get recent screenshots" });
+    }
+  });
+
+  app.get("/api/screenshots/:id", authenticateToken, apiRateLimiter, async (req, res) => {
+    try {
+      const screenshot = await storage.getScreenshot(req.params.id);
+      if (!screenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+
+      const access = await canAccessTeamMember(req.user!.id, screenshot.teamMemberId);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
+
+      res.json(screenshot);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get screenshot" });
+    }
+  });
+
+  app.post("/api/screenshots", async (req, res) => {
+    try {
+      const data = insertScreenshotSchema.parse(req.body);
+      const screenshot = await storage.createScreenshot(data);
+
+      await storage.updateTeamMember(data.teamMemberId, {
+        status: "online",
+      });
+
+      broadcast({ type: "SCREENSHOT_ADDED", screenshot });
+      res.status(201).json(screenshot);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create screenshot" });
+    }
+  });
+
+  app.delete("/api/screenshots/:id", authenticateToken, requireAdminOrManager, async (req, res) => {
+    try {
+      const screenshot = await storage.getScreenshot(req.params.id);
+      if (!screenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+
+      const access = await canAccessTeamMember(req.user!.id, screenshot.teamMemberId);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
+
+      await storage.deleteScreenshot(req.params.id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete screenshot" });
+    }
+  });
+
+  app.patch("/api/screenshots/:id/blur", authenticateToken, requireAdminOrManager, async (req, res) => {
+    try {
+      const existingScreenshot = await storage.getScreenshot(req.params.id);
+      if (!existingScreenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+
+      const access = await canAccessTeamMember(req.user!.id, existingScreenshot.teamMemberId);
+      if (!access.allowed) {
+        return res.status(403).json({ error: access.reason || "Access denied" });
+      }
+
+      const data = blurScreenshotSchema.parse(req.body);
+      const screenshot = await storage.updateScreenshotBlur(req.params.id, data.isBlurred);
+
+      if (!screenshot) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+
+      broadcast({ type: "SCREENSHOT_UPDATED", screenshot });
+      res.json(screenshot);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update screenshot" });
+    }
+  });
+
+  app.get("/uploads/screenshots/:filename", async (req, res) => {
+    try {
+      const filePath = path.join(process.cwd(), "uploads", "screenshots", req.params.filename);
+
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+
+      res.sendFile(filePath);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to serve screenshot" });
+    }
+  });
+
+  // ============================================================================
+  // ACTIVITY LOG ROUTES
+  // ============================================================================
+
   app.get("/api/activity-logs/:memberId", async (req, res) => {
     try {
       const logs = await storage.getActivityLogs(req.params.memberId);
@@ -926,11 +1630,11 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     try {
       const data = insertActivityLogSchema.parse(req.body);
       const log = await storage.createActivityLog(data);
-      
+
       await storage.updateTeamMember(data.teamMemberId, {
         status: "online",
       });
-      
+
       broadcast({ type: "ACTIVITY_LOGGED", log });
       res.status(201).json(log);
     } catch (error) {
@@ -941,70 +1645,28 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  const heartbeatSchema = z.object({
-    teamMemberId: z.string().min(1),
-    status: z.enum(["online", "idle", "offline"]).optional(),
-  });
+  // ============================================================================
+  // HEARTBEAT ROUTES
+  // ============================================================================
 
   app.post("/api/heartbeat", async (req, res) => {
     try {
       const data = heartbeatSchema.parse(req.body);
-      
+
       const member = await storage.updateTeamMember(data.teamMemberId, {
         status: data.status || "online",
       });
-      
+
       if (member) {
         broadcast({ type: "STATUS_CHANGED", member });
       }
-      
+
       res.json({ success: true });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });
       }
       res.status(500).json({ error: "Failed to update heartbeat" });
-    }
-  });
-
-  const agentRegisterSchema = z.object({
-    teamMemberId: z.string().min(1),
-    deviceName: z.string().min(1),
-    platform: z.enum(["windows", "macos", "linux"]),
-  });
-
-  app.post("/api/agent/register", async (req, res) => {
-    try {
-      const data = agentRegisterSchema.parse(req.body);
-      
-      const member = await storage.getTeamMember(data.teamMemberId);
-      if (!member) {
-        return res.status(404).json({ error: "Team member not found" });
-      }
-
-      const token = generateToken();
-      const agentToken = await storage.createAgentToken({
-        teamMemberId: data.teamMemberId,
-        token,
-        deviceName: data.deviceName,
-        platform: data.platform,
-        isActive: true,
-      });
-
-      res.status(201).json({
-        token,
-        agentId: agentToken.id,
-        teamMember: {
-          id: member.id,
-          name: member.name,
-          email: member.email,
-        },
-      });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to register agent" });
     }
   });
 
@@ -1042,215 +1704,9 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  const agentScreenshotSchema = z.object({
-    imageData: z.string().min(1),
-    mouseClicks: z.number().int().min(0).default(0),
-    keystrokes: z.number().int().min(0).default(0),
-    activityScore: z.number().min(0).max(100).default(0),
-  });
-
-  app.post("/api/agent/screenshot", screenshotRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      const data = agentScreenshotSchema.parse(req.body);
-
-      // Validate base64 image
-      const imageValidation = validateBase64Image(data.imageData);
-      if (!imageValidation.valid) {
-        return res.status(400).json({ error: imageValidation.error });
-      }
-
-      const uploadsDir = path.join(process.cwd(), "uploads", "screenshots");
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
-      }
-
-      const fileName = `${Date.now()}-${agentToken.teamMember.id}.png`;
-      const filePath = path.join(uploadsDir, fileName);
-      
-      const base64Data = data.imageData.replace(/^data:image\/\w+;base64,/, "");
-      
-      // Validate file size
-      const sizeInBytes = (base64Data.length * 3) / 4;
-      const sizeValidation = validateNumericRange(sizeInBytes, 0, 5 * 1024 * 1024, "File size");
-      if (!sizeValidation.valid) {
-        return res.status(400).json({ error: sizeValidation.error });
-      }
-      
-      fs.writeFileSync(filePath, base64Data, "base64");
-
-      const imageUrl = `/uploads/screenshots/${fileName}`;
-
-      const screenshot = await storage.createScreenshot({
-        teamMemberId: agentToken.teamMember.id,
-        imageUrl,
-        mouseClicks: data.mouseClicks,
-        keystrokes: data.keystrokes,
-        activityScore: data.activityScore,
-      });
-
-      await storage.updateTeamMember(agentToken.teamMember.id, {
-        status: "online",
-      });
-
-      await storage.updateAgentTokenLastSeen(agentToken.id);
-
-      broadcast({ type: "SCREENSHOT_ADDED", screenshot });
-
-      res.status(201).json({ success: true, screenshotId: screenshot.id });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to upload screenshot" });
-    }
-  });
-
-  const agentHeartbeatSchema = z.object({
-    status: z.enum(["online", "idle", "offline"]).optional(),
-    mouseClicks: z.number().int().min(0).optional(),
-    keystrokes: z.number().int().min(0).optional(),
-  });
-
-  app.post("/api/agent/heartbeat", heartbeatRateLimiter, async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      const data = agentHeartbeatSchema.parse(req.body);
-
-      const member = await storage.updateTeamMember(agentToken.teamMember.id, {
-        status: data.status || "online",
-      });
-
-      await storage.updateAgentTokenLastSeen(agentToken.id);
-
-      if (member) {
-        broadcast({ type: "STATUS_CHANGED", member });
-      }
-
-      const settings = await storage.getSettings();
-      const updatedMember = await storage.getTeamMember(agentToken.teamMember.id);
-
-      res.json({
-        success: true,
-        settings: {
-          screenshotInterval: updatedMember?.screenshotInterval || settings.screenshotInterval,
-          enableActivityTracking: settings.enableActivityTracking,
-          enableMouseTracking: settings.enableMouseTracking,
-          enableKeyboardTracking: settings.enableKeyboardTracking,
-        },
-        privacy: {
-          privacyMode: updatedMember?.privacyMode ?? false,
-          blurScreenshots: updatedMember?.blurScreenshots ?? false,
-          trackApps: updatedMember?.trackApps ?? true,
-          trackUrls: updatedMember?.trackUrls ?? true,
-          workHoursStart: updatedMember?.workHoursStart,
-          workHoursEnd: updatedMember?.workHoursEnd,
-          workHoursTimezone: updatedMember?.workHoursTimezone || "UTC",
-        },
-      });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to process heartbeat" });
-    }
-  });
-
-  app.get("/api/agent/settings", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      const settings = await storage.getSettings();
-      const member = agentToken.teamMember;
-
-      res.json({
-        screenshotInterval: member.screenshotInterval || settings.screenshotInterval,
-        enableActivityTracking: settings.enableActivityTracking,
-        enableMouseTracking: settings.enableMouseTracking,
-        enableKeyboardTracking: settings.enableKeyboardTracking,
-        isMonitoring: member.isMonitoring,
-        privacy: {
-          privacyMode: member.privacyMode ?? false,
-          blurScreenshots: member.blurScreenshots ?? false,
-          trackApps: member.trackApps ?? true,
-          trackUrls: member.trackUrls ?? true,
-          workHoursStart: member.workHoursStart,
-          workHoursEnd: member.workHoursEnd,
-          workHoursTimezone: member.workHoursTimezone || "UTC",
-        },
-      });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get agent settings" });
-    }
-  });
-
-  app.get("/api/team-members/:id/devices", authenticateToken, async (req, res) => {
-    try {
-      const access = await canAccessTeamMember(req.user!.id, req.params.id);
-      if (!access.allowed) {
-        return res.status(403).json({ error: access.reason || "Access denied" });
-      }
-      const devices = await storage.getAgentTokensByMember(req.params.id);
-      res.json(devices);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get devices" });
-    }
-  });
-
-  app.delete("/api/agent/devices/:id", async (req, res) => {
-    try {
-      await storage.deactivateAgentToken(req.params.id);
-      res.status(204).send();
-    } catch (error) {
-      res.status(500).json({ error: "Failed to deactivate device" });
-    }
-  });
-
-  app.get("/uploads/screenshots/:filename", async (req, res) => {
-    try {
-      const filePath = path.join(process.cwd(), "uploads", "screenshots", req.params.filename);
-      
-      if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: "Screenshot not found" });
-      }
-
-      res.sendFile(filePath);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to serve screenshot" });
-    }
-  });
+  // ============================================================================
+  // SETTINGS ROUTES
+  // ============================================================================
 
   app.get("/api/settings", authenticateToken, requireAdmin, async (_req, res) => {
     try {
@@ -1259,25 +1715,6 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     } catch (error) {
       res.status(500).json({ error: "Failed to get settings" });
     }
-  });
-
-  const settingsSchema = z.object({
-    screenshotInterval: z.number()
-      .int("screenshotInterval must be an integer")
-      .min(1, "screenshotInterval must be at least 1 second")
-      .max(60, "screenshotInterval must be 60 seconds or less")
-      .optional(),
-    enableActivityTracking: z.boolean().optional(),
-    enableMouseTracking: z.boolean().optional(),
-    enableKeyboardTracking: z.boolean().optional(),
-    enableNotifications: z.boolean().optional(),
-    idleThreshold: z.number()
-      .int("idleThreshold must be an integer")
-      .min(1, "idleThreshold must be at least 1 minute")
-      .max(30, "idleThreshold must be 30 minutes or less")
-      .optional(),
-    blurSensitiveContent: z.boolean().optional(),
-    autoStartMonitoring: z.boolean().optional(),
   });
 
   app.put("/api/settings", authenticateToken, requireAdmin, sanitizeInput, async (req: Request, res: Response) => {
@@ -1293,6 +1730,10 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       res.status(500).json({ error: "Failed to update settings" });
     }
   });
+
+  // ============================================================================
+  // TIME ENTRY ROUTES
+  // ============================================================================
 
   app.get("/api/time-entries", async (req, res) => {
     try {
@@ -1327,6 +1768,7 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
       const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
       const stats = await storage.getMemberTimeStats(req.params.id, startDate, endDate);
@@ -1336,19 +1778,16 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  const startTimerSchema = z.object({
-    teamMemberId: z.string().min(1),
-    project: z.string().optional(),
-    notes: z.string().optional(),
-  });
-
   app.post("/api/time-entries/start", async (req, res) => {
     try {
       const data = startTimerSchema.parse(req.body);
 
       const existingActive = await storage.getActiveTimeEntry(data.teamMemberId);
       if (existingActive) {
-        return res.status(400).json({ error: "Timer already running", activeEntry: existingActive });
+        return res.status(400).json({
+          error: "Timer already running",
+          activeEntry: existingActive,
+        });
       }
 
       const entry = await storage.createTimeEntry({
@@ -1386,12 +1825,6 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  const updateTimeEntrySchema = z.object({
-    project: z.string().optional(),
-    notes: z.string().optional(),
-    idleSeconds: z.number().int().min(0).optional(),
-  });
-
   app.patch("/api/time-entries/:id", async (req, res) => {
     try {
       const data = updateTimeEntrySchema.parse(req.body);
@@ -1407,14 +1840,6 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
       }
       res.status(500).json({ error: "Failed to update time entry" });
     }
-  });
-
-  const manualTimeEntrySchema = z.object({
-    teamMemberId: z.string().min(1),
-    startTime: z.string().datetime(),
-    endTime: z.string().datetime(),
-    project: z.string().optional(),
-    notes: z.string().optional(),
   });
 
   app.post("/api/time-entries/manual", async (req, res) => {
@@ -1459,222 +1884,9 @@ app.get("/api/team-members/with-stats", authenticateToken, apiRateLimiter, async
     }
   });
 
-  const agentTimerStartSchema = z.object({
-    project: z.string().optional(),
-    notes: z.string().optional(),
-  });
-
-// Agent authentication middleware
-async function agentAuth(req: Request, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing authorization token" });
-  }
-
-  const token = authHeader.slice(7);
-  const agentToken = await storage.getAgentTokenByToken(token);
-
-  if (!agentToken) {
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
-
-  // Attach the agent token to the request for easy access in handlers
-  (req as any).agent = agentToken;
-  next();
-}
-
-// Timer start endpoint
-app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response) => {
-  try {
-    const agentToken = (req as any).agent;
-    const data = agentTimerStartSchema.parse(req.body);
-
-    // Check if a timer is already running
-    const existingActive = await storage.getActiveTimeEntry(agentToken.teamMember.id);
-    if (existingActive) {
-      return res.status(400).json({
-        error: "Timer already running",
-        activeEntry: existingActive,
-      });
-    }
-
-    // Create new time entry
-    const entry = await storage.createTimeEntry({
-      teamMemberId: agentToken.teamMember.id,
-      startTime: new Date(),
-      project: data.project || null,
-      notes: data.notes || null,
-      isActive: true,
-      idleSeconds: 0,
-    });
-
-    // Update team member status and last seen for the agent
-    await storage.updateTeamMember(agentToken.teamMember.id, { status: "online" });
-    await storage.updateAgentTokenLastSeen(agentToken.id);
-
-    // Broadcast to any listeners (WebSocket or similar)
-    broadcast({ type: "TIMER_STARTED", entry });
-
-    res.status(201).json(entry);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: error.errors });
-    }
-    res.status(500).json({ error: "Failed to start timer" });
-  }
-});
-
-  app.post("/api/agent/timer/stop", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      const activeEntry = await storage.getActiveTimeEntry(agentToken.teamMember.id);
-      if (!activeEntry) {
-        return res.status(404).json({ error: "No active timer found" });
-      }
-
-      const entry = await storage.stopTimeEntry(activeEntry.id);
-      await storage.updateAgentTokenLastSeen(agentToken.id);
-
-      broadcast({ type: "TIMER_STOPPED", entry });
-      res.json(entry);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to stop timer" });
-    }
-  });
-
-  app.get("/api/agent/timer/status", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      const activeEntry = await storage.getActiveTimeEntry(agentToken.teamMember.id);
-      
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayStats = await storage.getMemberTimeStats(agentToken.teamMember.id, today);
-
-      res.json({
-        isRunning: !!activeEntry,
-        activeEntry,
-        todayStats,
-      });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get timer status" });
-    }
-  });
-
-  const agentIdleUpdateSchema = z.object({
-    idleSeconds: z.number().int().min(0),
-  });
-
-  app.post("/api/agent/timer/idle", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      const data = agentIdleUpdateSchema.parse(req.body);
-
-      const activeEntry = await storage.getActiveTimeEntry(agentToken.teamMember.id);
-      if (!activeEntry) {
-        return res.status(404).json({ error: "No active timer found" });
-      }
-
-      const entry = await storage.updateTimeEntry(activeEntry.id, {
-        idleSeconds: (activeEntry.idleSeconds || 0) + data.idleSeconds,
-      });
-
-      res.json(entry);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to update idle time" });
-    }
-  });
-
-  const appUsageSchema = z.object({
-    appName: z.string().min(1),
-    appType: z.enum(["application", "website"]).default("application"),
-    windowTitle: z.string().optional(),
-    url: z.string().optional(),
-  });
-
-  app.post("/api/agent/app-usage", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing authorization token" });
-      }
-
-      const token = authHeader.slice(7);
-      const agentToken = await storage.getAgentTokenByToken(token);
-
-      if (!agentToken) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-      }
-
-      await storage.updateAgentTokenLastSeen(agentToken.id);
-      const data = appUsageSchema.parse(req.body);
-
-      const activeUsage = await storage.getActiveAppUsage(agentToken.teamMember.id);
-
-      if (activeUsage) {
-        if (activeUsage.appName === data.appName && 
-            activeUsage.windowTitle === data.windowTitle) {
-          return res.json({ status: "unchanged", usage: activeUsage });
-        }
-
-        await storage.endAppUsage(activeUsage.id);
-      }
-
-      const usage = await storage.createAppUsage({
-        teamMemberId: agentToken.teamMember.id,
-        appName: data.appName,
-        appType: data.appType,
-        windowTitle: data.windowTitle,
-        url: data.url,
-        startTime: new Date(),
-        isActive: true,
-      });
-
-      broadcast({ type: "APP_USAGE_CHANGED", memberId: agentToken.teamMember.id, usage });
-      res.json({ status: "created", usage });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      res.status(500).json({ error: "Failed to record app usage" });
-    }
-  });
+  // ============================================================================
+  // APP USAGE ROUTES
+  // ============================================================================
 
   app.get("/api/team-members/:id/app-usage", authenticateToken, async (req, res) => {
     try {
@@ -1682,6 +1894,7 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const memberId = req.params.id;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -1701,6 +1914,7 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
       if (!access.allowed) {
         return res.status(403).json({ error: access.reason || "Access denied" });
       }
+
       const memberId = req.params.id;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -1712,34 +1926,40 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
+  // ============================================================================
+  // REPORTS ROUTES
+  // ============================================================================
+
   app.get("/api/reports", authenticateToken, apiRateLimiter, sanitizeInput, async (req: Request, res: Response) => {
     try {
       const { startDate, endDate } = req.query;
-      
+
       if (!startDate || !endDate) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: "startDate and endDate are required",
-          expectedFormat: "YYYY-MM-DD or ISO 8601 format (e.g., 2024-01-15 or 2024-01-15T00:00:00Z)"
+          expectedFormat: "YYYY-MM-DD or ISO 8601 format",
         });
       }
 
       const start = new Date(startDate as string);
       const end = new Date(endDate as string);
 
-      // Enhanced date validation
-      const dateValidation = validateDateRange(start, end, { start: "startDate", end: "endDate" });
+      const dateValidation = validateDateRange(start, end, {
+        start: "startDate",
+        end: "endDate",
+      });
       if (!dateValidation.valid) {
         return res.status(400).json({ error: dateValidation.error });
       }
 
       const members = await storage.getAllTeamMembers();
       const timeEntries = await storage.getAllTimeEntries(start, end);
-      
+
       const timeBreakdown = await Promise.all(
         members.map(async (member) => {
           const stats = await storage.getMemberTimeStats(member.id, start, end);
           const entries = await storage.getTimeEntriesByMember(member.id, start, end);
-          
+
           const projectMap = new Map<string, number>();
           for (const entry of entries) {
             const projectName = entry.project || "No Project";
@@ -1760,11 +1980,11 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
             idleTime: stats.totalIdleSeconds,
             projects,
           };
-        })
+        }),
       );
 
       const teamAppUsageMap = new Map<string, { appType: string; totalDuration: number; users: Set<string> }>();
-      
+
       for (const member of members) {
         const appSummary = await storage.getAppUsageSummary(member.id, start, end);
         for (const app of appSummary) {
@@ -1836,16 +2056,13 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
       const totalIdleTime = timeBreakdown.reduce((sum, m) => sum + m.idleTime, 0);
       const totalScreenshots = productivity.reduce((sum, d) => sum + d.screenshots, 0);
 
-      const screenshotsInRange = allScreenshots.filter(
-        s => s.capturedAt >= start && s.capturedAt <= end
-      );
-      const avgActivityScore = screenshotsInRange.length > 0
-        ? screenshotsInRange.reduce((sum, s) => sum + (s.activityScore || 0), 0) / screenshotsInRange.length
-        : 0;
+      const screenshotsInRange = allScreenshots.filter((s) => s.capturedAt >= start && s.capturedAt <= end);
+      const avgActivityScore =
+        screenshotsInRange.length > 0 ? screenshotsInRange.reduce((sum, s) => sum + (s.activityScore || 0), 0) / screenshotsInRange.length : 0;
 
       res.json({
         productivity,
-        timeBreakdown: timeBreakdown.filter(m => m.totalTime > 0),
+        timeBreakdown: timeBreakdown.filter((m) => m.totalTime > 0),
         teamAppUsage,
         summary: {
           totalActiveTime,
@@ -1860,11 +2077,94 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  // ============ BILLING ROUTES (Pay-per-user) ============
+  // ============================================================================
+  // USER MANAGEMENT ROUTES
+  // ============================================================================
+
+  app.get("/api/users", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const employees = await storage.getUsersByCompany(req.user!.companyId);
+      const usersWithoutPasswords = employees.map(({ password, refreshToken, ...user }) => user);
+      res.json(usersWithoutPasswords);
+    } catch (error) {
+      console.error("Failed to get users:", error);
+      res.status(500).json({ error: "Failed to get users" });
+    }
+  });
+
+  app.patch("/api/users/:userId/role", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+      const { role } = updateUserRoleSchema.parse(req.body);
+
+      if (userId === req.user!.id) {
+        return res.status(400).json({ error: "Cannot change your own role" });
+      }
+
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (targetUser.companyId !== req.user!.companyId) {
+        return res.status(403).json({ error: "User belongs to a different company" });
+      }
+
+      await db.update(users).set({ role, updatedAt: new Date() }).where(eq(users.id, userId));
+
+      const [member] = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId));
+      if (member) {
+        await db.update(teamMembers).set({ role }).where(eq(teamMembers.userId, userId));
+      }
+
+      res.json({ success: true, userId, newRole: role });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("Failed to update user role:", error);
+      res.status(500).json({ error: "Failed to update user role" });
+    }
+  });
+
+  app.patch("/api/users/:userId/status", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+      const { isActive } = req.body;
+
+      if (typeof isActive !== "boolean") {
+        return res.status(400).json({ error: "isActive must be a boolean" });
+      }
+
+      if (userId === req.user!.id) {
+        return res.status(400).json({ error: "Cannot deactivate your own account" });
+      }
+
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (targetUser.companyId !== req.user!.companyId) {
+        return res.status(403).json({ error: "User belongs to a different company" });
+      }
+
+      await db.update(users).set({ isActive, updatedAt: new Date() }).where(eq(users.id, userId));
+
+      res.json({ success: true, userId, isActive });
+    } catch (error) {
+      console.error("Failed to update user status:", error);
+      res.status(500).json({ error: "Failed to update user status" });
+    }
+  });
+
+  // ============================================================================
+  // BILLING ROUTES
+  // ============================================================================
+
   const { stripeService } = await import("./stripe/stripeService");
   const { getStripePublishableKey } = await import("./stripe/stripeClient");
 
-  // Get Stripe publishable key for frontend
   app.get("/api/billing/config", async (req: Request, res: Response) => {
     try {
       const publishableKey = await getStripePublishableKey();
@@ -1875,7 +2175,6 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  // Get company subscription status
   app.get("/api/billing/subscription", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
     try {
       const company = await storage.getCompany(req.user!.companyId);
@@ -1883,15 +2182,13 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
         return res.status(404).json({ error: "Company not found" });
       }
 
-      // Count active employees
       const employees = await storage.getUsersByCompany(req.user!.companyId);
-      const activeEmployeeCount = employees.filter(e => e.isActive).length;
+      const activeEmployeeCount = employees.filter((e) => e.isActive).length;
 
-      // Get subscription from Stripe if exists
       let subscription = null;
       if (company.stripeCustomerId) {
         const subscriptions = await db.execute(
-          sql`SELECT * FROM stripe.subscriptions WHERE customer = ${company.stripeCustomerId} AND status = 'active' LIMIT 1`
+          sql`SELECT * FROM stripe.subscriptions WHERE customer = ${company.stripeCustomerId} AND status = 'active' LIMIT 1`,
         );
         subscription = subscriptions.rows[0] || null;
       }
@@ -1911,7 +2208,6 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  // List available products/prices
   app.get("/api/billing/products", async (req: Request, res: Response) => {
     try {
       const rows = await stripeService.listProductsWithPrices();
@@ -1924,7 +2220,7 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
             name: row.product_name,
             description: row.product_description,
             active: row.product_active,
-            prices: []
+            prices: [],
           });
         }
         if (row.price_id) {
@@ -1945,11 +2241,10 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  // Create checkout session for subscription
   app.post("/api/billing/checkout", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
     try {
       const { priceId, quantity } = req.body;
-      
+
       if (!priceId) {
         return res.status(400).json({ error: "Price ID is required" });
       }
@@ -1959,30 +2254,24 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
         return res.status(404).json({ error: "Company not found" });
       }
 
-      // Create or get Stripe customer
       let customerId = company.stripeCustomerId;
       if (!customerId) {
-        const customer = await stripeService.createCustomer(
-          company.email,
-          company.id,
-          company.name
-        );
+        const customer = await stripeService.createCustomer(company.email, company.id, company.name);
         await storage.updateCompanyStripeCustomerId(company.id, customer.id);
         customerId = customer.id;
       }
 
-      // Count employees for quantity
       const employees = await storage.getUsersByCompany(req.user!.companyId);
-      const employeeCount = quantity || employees.filter(e => e.isActive).length || 1;
+      const employeeCount = quantity || employees.filter((e) => e.isActive).length || 1;
 
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
       const session = await stripeService.createCheckoutSession(
         customerId,
         priceId,
         employeeCount,
         `${baseUrl}/settings?billing=success`,
         `${baseUrl}/settings?billing=canceled`,
-        company.id
+        company.id,
       );
 
       res.json({ url: session.url });
@@ -1992,7 +2281,6 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  // Create customer portal session for managing subscription
   app.post("/api/billing/portal", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
     try {
       const company = await storage.getCompany(req.user!.companyId);
@@ -2000,11 +2288,8 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
         return res.status(400).json({ error: "No active subscription found" });
       }
 
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const session = await stripeService.createCustomerPortalSession(
-        company.stripeCustomerId,
-        `${baseUrl}/settings`
-      );
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      const session = await stripeService.createCustomerPortalSession(company.stripeCustomerId, `${baseUrl}/settings`);
 
       res.json({ url: session.url });
     } catch (error) {
@@ -2013,7 +2298,6 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     }
   });
 
-  // Update subscription quantity when employees change
   app.post("/api/billing/update-seats", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
     try {
       const company = await storage.getCompany(req.user!.companyId);
@@ -2021,9 +2305,8 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
         return res.status(400).json({ error: "No active subscription found" });
       }
 
-      // Get active subscription
       const subscriptions = await db.execute(
-        sql`SELECT * FROM stripe.subscriptions WHERE customer = ${company.stripeCustomerId} AND status = 'active' LIMIT 1`
+        sql`SELECT * FROM stripe.subscriptions WHERE customer = ${company.stripeCustomerId} AND status = 'active' LIMIT 1`,
       );
       const subscription = subscriptions.rows[0] as any;
 
@@ -2031,9 +2314,8 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
         return res.status(400).json({ error: "No active subscription found" });
       }
 
-      // Count active employees
       const employees = await storage.getUsersByCompany(req.user!.companyId);
-      const newQuantity = employees.filter(e => e.isActive).length;
+      const newQuantity = employees.filter((e) => e.isActive).length;
 
       await stripeService.updateSubscriptionQuantity(subscription.id, newQuantity);
 
@@ -2041,97 +2323,6 @@ app.post("/api/agent/timer/start", agentAuth, async (req: Request, res: Response
     } catch (error) {
       console.error("Failed to update seats:", error);
       res.status(500).json({ error: "Failed to update subscription seats" });
-    }
-  });
-
-  // ============ USER MANAGEMENT / PERMISSION ROUTES ============
-  
-  // Get all users in the company (admin only)
-  app.get("/api/users", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-    try {
-      const employees = await storage.getUsersByCompany(req.user!.companyId);
-      const usersWithoutPasswords = employees.map(({ password, refreshToken, ...user }) => user);
-      res.json(usersWithoutPasswords);
-    } catch (error) {
-      console.error("Failed to get users:", error);
-      res.status(500).json({ error: "Failed to get users" });
-    }
-  });
-
-  // Update user role (admin only)
-  const updateUserRoleSchema = z.object({
-    role: z.enum(["admin", "manager", "viewer"]),
-  });
-
-  app.patch("/api/users/:userId/role", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-    try {
-      const { userId } = req.params;
-      const { role } = updateUserRoleSchema.parse(req.body);
-
-      // Cannot change own role
-      if (userId === req.user!.id) {
-        return res.status(400).json({ error: "Cannot change your own role" });
-      }
-
-      // Ensure user belongs to the same company
-      const targetUser = await storage.getUser(userId);
-      if (!targetUser) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      if (targetUser.companyId !== req.user!.companyId) {
-        return res.status(403).json({ error: "User belongs to a different company" });
-      }
-
-      await db.update(users).set({ role, updatedAt: new Date() }).where(eq(users.id, userId));
-
-      // Also update the team member role if exists
-      const [member] = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId));
-      if (member) {
-        await db.update(teamMembers).set({ role }).where(eq(teamMembers.userId, userId));
-      }
-
-      res.json({ success: true, userId, newRole: role });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      console.error("Failed to update user role:", error);
-      res.status(500).json({ error: "Failed to update user role" });
-    }
-  });
-
-  // Toggle user active status (admin only)
-  app.patch("/api/users/:userId/status", authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-    try {
-      const { userId } = req.params;
-      const { isActive } = req.body;
-
-      if (typeof isActive !== "boolean") {
-        return res.status(400).json({ error: "isActive must be a boolean" });
-      }
-
-      // Cannot deactivate self
-      if (userId === req.user!.id) {
-        return res.status(400).json({ error: "Cannot deactivate your own account" });
-      }
-
-      // Ensure user belongs to the same company
-      const targetUser = await storage.getUser(userId);
-      if (!targetUser) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      if (targetUser.companyId !== req.user!.companyId) {
-        return res.status(403).json({ error: "User belongs to a different company" });
-      }
-
-      await db.update(users).set({ isActive, updatedAt: new Date() }).where(eq(users.id, userId));
-
-      res.json({ success: true, userId, isActive });
-    } catch (error) {
-      console.error("Failed to update user status:", error);
-      res.status(500).json({ error: "Failed to update user status" });
     }
   });
 
